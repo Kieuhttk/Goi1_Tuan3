@@ -1,6 +1,6 @@
-python-telegram-bot
-pandas
-matplotlib
-requests
-vnstock
-flask
+python-telegram-bot==20.7
+pandas==2.2.0
+matplotlib==3.8.2
+requests==2.31.0
+vnstock==0.2.8.7
+flask==3.0.0
