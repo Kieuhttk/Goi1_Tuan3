@@ -2,3 +2,4 @@ python-telegram-bot
 pandas
 matplotlib
 requests
+vnstock
