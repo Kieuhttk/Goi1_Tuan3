@@ -285,6 +285,7 @@ if __name__ == "__main__":
 
     print("✅ Bot đã sẵn sàng nhận lệnh từ Telegram!")
     app.run_polling(poll_interval=1.0, timeout=30)
+
 from threading import Thread
 from flask import Flask
 
@@ -293,7 +294,7 @@ app_web = Flask('')
 
 @app_web.route('/')
 def home():
-    return "Bot is running 24/7!"
+    return "Bot AI FinBot is running 24/7!"
 
 def run_web():
     # Render sẽ tự cấp biến môi trường PORT, nếu không có thì mặc định 8080
@@ -306,6 +307,14 @@ def keep_alive():
     t.start()
 
 if __name__ == "__main__":
-    keep_alive()  # Khởi chạy web server song song
+    keep_alive()  # Khởi chạy server Flask trước khi chạy Bot
     print("🚀 Đang khởi chạy Telegram Bot AI FinBot...")
-    # ... các dòng app.add_handler và app.run_polling giữ nguyên
+    app = ApplicationBuilder().token(BOT_TOKEN).read_timeout(30).write_timeout(30).connect_timeout(30).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("trade", trade_command))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze_ticker))
+    app.add_error_handler(global_error_handler)
+
+    print("✅ Bot đã sẵn sàng nhận lệnh từ Telegram!")
+    app.run_polling(poll_interval=1.0, timeout=30)
