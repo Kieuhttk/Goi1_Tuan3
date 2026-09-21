@@ -81,7 +81,7 @@ def generate_chart(df: pd.DataFrame, symbol: str) -> str:
 
 
 # ==============================================================================
-# 2. XỬ LÝ LỆNH PHÂN TÍCH
+# 2. XỬ LÝ LỆNH PHÂN TÍCH & LỆNH START
 # ==============================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
@@ -156,14 +156,30 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_bank = symbol in BANK_AND_FINANCE_SYMBOLS
 
         # ----------------------------------------------------------------------
-        # ĐÁNH GIÁ TÍNH HIỆU KỸ THUẬT
+        # (2) ĐÁNH GIÁ TÍN HIỆU KỸ THUẬT (ĐÃ SỬA CHÍNH XÁC XU HƯỚNG EMA20)
         # ----------------------------------------------------------------------
-        price_diff_pct = ((price - ema20) / ema20) * 100
-        if price >= ema20:
-            trend_str = "Đi ngang tích lũy" if abs(price_diff_pct) <= 1.5 else "Uptrend (Trên EMA20)"
-        else:
-            trend_str = "Downtrend (Dưới EMA20)"
+        # So sánh với EMA20 của 5 phiên trước (1 tuần)
+        lookback = 5 if len(df_ind) >= 5 else len(df_ind) - 1
+        ema20_prev_raw = float(df_ind['ema20'].iloc[-1 - lookback]) if lookback > 0 else raw_ema20
+        ema20_prev = ema20_prev_raw / 1000.0 if ema20_prev_raw > 1000 else ema20_prev_raw
 
+        # Tính phần trăm thay đổi của đường EMA20
+        ema20_change_pct = ((ema20 - ema20_prev) / ema20_prev) * 100 if ema20_prev > 0 else 0
+
+        # Xác định độ dốc đường EMA20 với ngưỡng 0.05%
+        if ema20_change_pct > 0.05:
+            ema_slope_str = "Uptrend (Dốc lên)"
+        elif ema20_change_pct < -0.05:
+            ema_slope_str = "Downtrend (Dốc xuống)"
+        else:
+            ema_slope_str = "Đi ngang tích lũy"
+
+        # Vị thế Giá so với EMA20
+        price_pos_str = "Giá trên EMA20" if price >= ema20 else "Giá dưới EMA20"
+
+        trend_str = f"{ema_slope_str} ({price_pos_str})"
+
+        # Đánh giá RSI
         if rsi14 >= 70:
             rsi_str = f"{rsi14:.1f} (Quá Mua)"
         elif rsi14 >= 50:
@@ -171,7 +187,8 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             rsi_str = f"{rsi14:.1f} (Động lượng Yếu)"
 
-        if price > ema20 and 50 <= rsi14 <= 68 and roe >= 12.0:
+        # Khuyến nghị
+        if price > ema20 and ema20_change_pct > -0.05 and 50 <= rsi14 <= 68 and roe >= 12.0:
             recommendation = "💡 **TÍN HIỆU MUA xuất hiện!** (Giá tích lũy trên EMA20 & FA ổn định)"
         elif price < ema20:
             recommendation = "🚨 **CẢNH BÁO BÁN / NÊN HẠ TỶ TRỌNG** (Giá gãy EMA20)"
@@ -211,7 +228,7 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # ----------------------------------------------------------------------
-        # (2) VẼ VÀ GỬI ẢNH BIỂU ĐỒ QUA TELEGRAM
+        # VẼ VÀ GỬI ẢNH BIỂU ĐỒ QUA TELEGRAM
         # ----------------------------------------------------------------------
         chart_path = generate_chart(df_ind, symbol)
 
@@ -222,7 +239,7 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # Xóa file ảnh tạm sau khi gửi xong
+        # Xóa file ảnh tạm sau khi gửi
         if os.path.exists(chart_path):
             os.remove(chart_path)
 
