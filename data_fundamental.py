@@ -2,7 +2,7 @@
 # MODULE: data_fundamental.py
 # Chức năng:
 #   - Trích xuất, chuẩn hóa dữ liệu BCTC từ VnStock (Xoay vòng nguồn VCI, TCBS, KBS)
-#   - Phân loại Doanh nghiệp thường vs Ngân hàng (Loại bỏ D/E, bổ sung chỉ tiêu Ngân hàng)
+#   - Phân loại Doanh nghiệp thường vs Ngân hàng (Loại bỏ D/E, bổ sung NIM)
 #   - Quản lý Cache dữ liệu tài chính qua SQLite Database
 #   - Đánh giá Điểm Mua (FA) & Bộ lọc 4 KỊCH BẢN BÁN Quản trị rủi ro
 # ==============================================================================
@@ -87,14 +87,15 @@ def check_fa_violation(fund_data: dict) -> tuple[bool, str]:
     # --------------------------------------------------------------------------
     # LOGIC KIỂM TRA CHO NHÓM NGÂN HÀNG (Không xét D/E)
     # --------------------------------------------------------------------------
-    
-    if net_profit < 0:
+    if is_bank:
+        if net_profit <= 0:
             reasons.append("Ngân hàng báo lỗ trong kỳ")
-    if roe < 8.0:
+        if roe < 8.0:
             reasons.append(f"ROE suy yếu nghiêm trọng (ROE = {roe:.2f}% < 8%)")
-    if reasons:
+        
+        if reasons:
             return True, "❌ BÁN VI PHẠM FA NGÂN HÀNG: " + "; ".join(reasons)
-            return False, ""
+        return False, ""
 
     # --------------------------------------------------------------------------
     # LOGIC KIỂM TRA CHO DOANH NGHIỆP THƯỜNG (Sản xuất, Thương mại, BĐS...)
@@ -102,7 +103,7 @@ def check_fa_violation(fund_data: dict) -> tuple[bool, str]:
     else:
         debt_equity = fund_data.get("debt_equity", 0.0)
 
-        if net_profit < 0:
+        if net_profit <= 0:
             reasons.append("Doanh nghiệp báo lỗ trong kỳ")
         if roe < 5.0:
             reasons.append(f"ROE quá thấp (ROE = {roe:.2f}% < 5%)")
@@ -129,10 +130,11 @@ def fundamental_signal(fund_data: dict, mode: str = "than_trong") -> str:
         return "HOLD"
 
     if is_bank:
-        # Ngân hàng không xét D/E, nâng tiêu chuẩn ROE
-        if mode == "than_trong" and roe >= 15.0:
+        nim = fund_data.get("nim_ratio", 0.0)
+        # Ngân hàng bổ sung điều kiện NIM >= 2.0%
+        if mode == "than_trong" and roe >= 15.0 and nim >= 2.0:
             return "BUY"
-        elif mode == "mao_hiem" and roe >= 10.0:
+        elif mode == "mao_hiem" and roe >= 10.0 and nim >= 1.5:
             return "BUY"
     else:
         # Doanh nghiệp thường
@@ -147,56 +149,50 @@ def fundamental_signal(fund_data: dict, mode: str = "than_trong") -> str:
 
 def evaluate_sell_scenarios(symbol: str, current_price: float, ta_data: dict, fund_data: dict, entry_price: float = None) -> dict:
     """
-    TỔNG HỢP TRỌN BỘ 4 KỊCH BẢN BÁN TRONG QUẢN TRỊ RỦI RO:
-    1. Stop-Loss Động (-7% cảnh báo hạ tỷ trọng / -10% cắt lỗ cứng)
-    2. Take-Profit Từng Phần (+15% chốt 50% / +25% chốt hết)
-    3. Trailing Stop (Gãy EMA20 kèm Volume xả lớn > 1.2x MA20)
-    4. Vi phạm Cơ bản FA (Phân loại riêng cho Doanh nghiệp thường và Ngân hàng)
+    TỔNG HỢP TRỌN BỘ 4 KỊCH BẢN BÁN TRONG QUẢN TRỊ RỦI RO (ĐỒNG BỘ BACKTEST):
+    1. Stop-Loss (-3.5% cắt lỗ cứng)
+    2. Take-Profit (+5.0% chốt lời chủ động)
+    3. Trailing Stop (Gãy EMA50 hoặc RSI >= 62)
+    4. Vi phạm Cơ bản FA
     """
-    ema20 = ta_data.get("ema20", 0.0)
-    vol_ratio = ta_data.get("volume_ratio", 0.0)
+    ema50 = ta_data.get("ema50", 0.0)
+    rsi14 = ta_data.get("rsi14", 50.0)
     
     profit_pct = 0.0
     if entry_price and entry_price > 0:
         profit_pct = ((current_price - entry_price) / entry_price) * 100.0
 
-    # KỊCH BẢN 1: STOP-LOSS ĐỘNG (-7% / -10%)
-    if entry_price and profit_pct <= -10.0:
+    # KỊCH BẢN 1: STOP-LOSS CHẶT CỐ ĐỊNH (-3.5%)
+    if entry_price and profit_pct <= -3.5:
         return {
             "signal": "SELL",
-            "scenario": "STOP_LOSS_HARD",
-            "reason": f"🚨 CẮT LỖ BẮT BUỘC: Vi phạm ngưỡng dừng lỗ tối đa (Lỗ: {profit_pct:.1f}% <= -10%)."
-        }
-    elif entry_price and profit_pct <= -7.0:
-        return {
-            "signal": "SELL",
-            "scenario": "STOP_LOSS_SOFT",
-            "reason": f"⚠️ CẮT LỖ BẢO VỆ: Vi phạm ngưỡng cảnh báo -7% (Lỗ: {profit_pct:.1f}%). Nên hạ 50% vị thế."
+            "scenario": "STOP_LOSS",
+            "reason": f"🚨 CẮT LỖ BẮT BUỘC: Vi phạm ngưỡng dừng lỗ tối đa (Lỗ: {profit_pct:.1f}% <= -3.5%)."
         }
 
-    # KỊCH BẢN 2: TAKE-PROFIT TỪNG PHẦN (+15% / +25%)
-    if entry_price and profit_pct >= 25.0:
+    # KỊCH BẢN 2: TAKE-PROFIT TỔNG CHỦ ĐỘNG (+5.0%)
+    if entry_price and profit_pct >= 5.0:
         return {
             "signal": "SELL",
-            "scenario": "TAKE_PROFIT_FULL",
-            "reason": f"🎯 CHỐT LỜI MỤC TIÊU LỚN: Đạt lợi nhuận kỳ vọng (+{profit_pct:.1f}% >= +25%). Chốt toàn bộ vị thế."
-        }
-    elif entry_price and profit_pct >= 15.0:
-        return {
-            "signal": "SELL",
-            "scenario": "TAKE_PROFIT_PARTIAL",
-            "reason": f"💰 CHỐT LỜI TỪNG PHẦN: Lợi nhuận đạt {profit_pct:.1f}% (>= +15%). Khuyến nghị bán 50% hiện thực hóa lợi nhuận."
+            "scenario": "TAKE_PROFIT",
+            "reason": f"💰 CHỐT LỜI TỰ ĐỘNG: Lợi nhuận đạt {profit_pct:.1f}% (>= +5.0%). Khóa lợi nhuận."
         }
 
-    # KỊCH BẢN 3: TRAILING STOP (GÃY TREND + VOL LỚN)
-    if current_price < ema20 and vol_ratio >= 1.2:
+    # KỊCH BẢN 3: TRAILING STOP / VÙNG QUÁ MUA KỸ THUẬT
+    if rsi14 >= 62.0:
+        return {
+            "signal": "SELL",
+            "scenario": "RSI_OVERBOUGHT",
+            "reason": f"⚠️ RSI QUÁ MUA: RSI14 đạt {rsi14:.1f} >= 62. Áp lực chốt lời ngắn hạn lớn."
+        }
+    if ema50 > 0 and current_price < ema50:
         return {
             "signal": "SELL",
             "scenario": "TRAILING_STOP",
-            "reason": f"🛑 TRAILING STOP: Giá đâm thủng EMA20 kèm áp lực xả hàng mạnh (Volume = {vol_ratio:.1f}x MA20)."
+            "reason": f"🛑 TRAILING STOP: Giá đâm thủng đường xu hướng chính EMA50."
         }
 
-    # KỊCH BẢN 4: VI PHẠM NỀN TẢNG FA (Chỉ gọi hàm kiểm tra riêng biệt)
+    # KỊCH BẢN 4: VI PHẠM NỀN TẢNG FA
     is_violated, fa_reason = check_fa_violation(fund_data)
     if is_violated:
         return {
@@ -205,25 +201,19 @@ def evaluate_sell_scenarios(symbol: str, current_price: float, ta_data: dict, fu
             "reason": fa_reason
         }
 
-    return {"signal": "HOLD", "scenario": "NONE", "reason": "Chưa chạm ngưỡng vi phạm 4 kịch bản bán."}
+    return {"signal": "HOLD", "scenario": "NONE", "reason": "Chưa chạm ngưỡng vi phạm kịch bản bán."}
 
 
 # ==============================================================================
-# ==============================================================================
-# TRUY XUẤT & CACHE DỮ LIỆU BCTC (ĐÃ SỬA LỖI LẤY NIM CHO NGÂN HÀNG)
+# TRUY XUẤT & CACHE DỮ LIỆU BCTC
 # ==============================================================================
 def get_clean_financial_data(symbol: str) -> dict:
-    """
-    Lấy dữ liệu FA cơ bản. Tự động kiểm tra SQLite Database Cache trước, 
-    nếu chưa có mới cào từ VnStock (tự động xoay vòng VCI -> TCBS -> KBS).
-    """
     symbol = symbol.upper()
     is_bank = symbol in BANK_SYMBOLS
 
     # BƯỚC 1: ĐỌC TỪ DATABASE CACHE
     cached_data = get_fa_from_db(symbol)
     if cached_data:
-        # Nếu cache cũ thiếu thông tin nim của ngân hàng, bỏ qua cache để cào mới
         if is_bank and cached_data.get("nim_ratio", 0.0) == 0.0:
             pass
         else:
@@ -231,7 +221,7 @@ def get_clean_financial_data(symbol: str) -> dict:
             print(f"⚡ [CACHE HIT] Lấy dữ liệu FA của mã #{symbol} từ Database thành công.")
             return cached_data
 
-    # BƯỚC 2: TẢI DỮ LIỆU TỪ VNSTOCK (XOAY VÒNG NGUỒN)
+    # BƯỚC 2: TẢI DỮ LIỆU TỪ VNSTOCK
     print(f"🌐 [API CALL] Đang truy xuất dữ liệu FA mới cho mã #{symbol} từ VnStock...")
     sources = ["VCI", "TCBS", "KBS"]
     
@@ -261,9 +251,6 @@ def get_clean_financial_data(symbol: str) -> dict:
             debt_equity = 0.0
             nim_ratio = 0.0
 
-            # ------------------------------------------------------------------
-            # XỬ LÝ DOANH NGHIỆP THƯỜNG
-            # ------------------------------------------------------------------
             if not is_bank:
                 if bs is not None and not bs.empty:
                     if 'item' not in bs.columns:
@@ -295,9 +282,6 @@ def get_clean_financial_data(symbol: str) -> dict:
                         if debt_equity > 50.0:
                             debt_equity /= 100.0
 
-            # ------------------------------------------------------------------
-            # XỬ LÝ RIÊNG BẢNG CHỈ TIỂU CHO NGÂN HÀNG (NIM)
-            # ------------------------------------------------------------------
             else:
                 if ratio is not None and not ratio.empty:
                     if 'item' not in ratio.columns:
@@ -306,14 +290,11 @@ def get_clean_financial_data(symbol: str) -> dict:
                     latest_q_ratio = get_latest_time_col(ratio)
 
                     if latest_q_ratio:
-                        
-                        # Trích xuất NIM (Biên lãi thuần)
                         nim_ratio = get_val_by_exact_or_kw(ratio, item_col_ratio, latest_q_ratio, [
                             'Tỷ lệ thu nhập lãi thuần (NIM)', 'Biên lãi thuần (NIM)', 
                             'NIM (%)', 'NIM', 'Net interest margin'
                         ])
 
-                # Tính dự phòng NIM từ Báo cáo kết quả kinh doanh & Cân đối kế toán nếu Ratio bị thiếu
                 if nim_ratio == 0.0:
                     net_interest_income = get_val_by_exact_or_kw(income, item_col_income, latest_q_income, [
                         'Thu nhập lãi thuần', 'Thu nhập lãi thuần quý', 'Net interest income'
@@ -327,12 +308,8 @@ def get_clean_financial_data(symbol: str) -> dict:
                             'TỔNG CỘNG TÀI SẢN', 'Tổng tài sản', 'Total assets'
                         ])
                         if total_assets > 0 and net_interest_income > 0:
-                            # NIM quý quy năm tương đối = (Thu nhập lãi thuần quý * 4) / Tổng tài sản
                             nim_ratio = ((net_interest_income * 4) / total_assets) * 100.0
 
-            # ------------------------------------------------------------------
-            # LẤY ROE & GROSS MARGIN & NET PROFIT
-            # ------------------------------------------------------------------
             roe = 0.0
             gross_margin = 0.0
             
@@ -365,7 +342,6 @@ def get_clean_financial_data(symbol: str) -> dict:
                 'Lãi/(lỗ) thuần sau thuế', 'Lợi nhuận sau thuế'
             ])
 
-            # Chuẩn hóa tỷ lệ % (Tránh trường hợp nguồn trả về 0.0121 thay vì 1.21%)
             if 0 < abs(roe) < 1.0:
                 roe *= 100.0
             if 0 < abs(gross_margin) < 1.0:
@@ -387,7 +363,6 @@ def get_clean_financial_data(symbol: str) -> dict:
                 "listed_status": "Normal"
             }
 
-            # BƯỚC 3: LƯU CACHE VÀO DB VÀ TRẢ VỀ
             save_fa_to_db(final_data)
             return final_data
 
@@ -414,13 +389,13 @@ if __name__ == "__main__":
         "is_bank": True
     }
     
-    dummy_ta = {"ema20": 22.28, "volume_ratio": 0.97}
+    dummy_ta = {"ema20": 22.28, "ema50": 21.80, "rsi14": 52.0, "volume_ratio": 0.97}
     
     sell_res = evaluate_sell_scenarios(
         symbol="ACB", 
         current_price=22.0, 
         ta_data=dummy_ta, 
         fund_data=acb_fa_dummy, 
-        entry_price=0.0
+        entry_price=21.5
     )
     print("👉 Kết quả kiểm tra ACB (Mong đợi: HOLD):", sell_res)

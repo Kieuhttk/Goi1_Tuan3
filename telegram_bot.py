@@ -3,13 +3,16 @@
 # Chức năng:
 #   - Telegram Bot Interface cho hệ thống AI FinBot
 #   - Tự động vẽ biểu đồ kỹ thuật (TA Chart) và tạo Báo cáo định dạng HTML
+#   - Cung cấp hàm send_telegram_signal cho các bot quét tín hiệu tự động
 #   - Khởi chạy Web Server giữ Port 24/7 trên Render
 # ==============================================================================
 import os
 import logging
 import warnings
+import asyncio
 import pandas as pd
 import html
+import requests
 from datetime import datetime, time as dtime
 from threading import Thread
 from flask import Flask
@@ -48,14 +51,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Đưa Token vào biến môi trường
+# Đưa Token & Chat ID vào biến môi trường
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8665430392:AAGk2aN9MwynAPE1V5eoXa_wGBcJFxT1FdI")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Danh mục vị thế đang giữ giả định (Dùng để tính Stoploss/Takeprofit chính xác)
 PORTFOLIO_POSITIONS = {
     "HPG": 26500,  # Giá vốn HPG: 26.500 VNĐ
     "VNM": 68000   # Giá vốn VNM: 68.000 VNĐ
 }
+
+# ==============================================================================
+# HÀM GIÚP BÁO TÍN HIỆU TỰ ĐỘNG CHO MAIN_SIGNAL_BOT
+# ==============================================================================
+def send_telegram_signal(symbol: str, signal_type: str, price: float, ema20: float, rsi: float, fund_info: dict, technical_reasons: str = "", trade_plan: str = ""):
+    """Hàm gửi tín hiệu Mua/Bán tự động qua Telegram API Sync cho main_signal_bot."""
+    if not BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("⚠️ Thiếu TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID. Không thể gửi tin nhắn tự động.")
+        return False
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    
+    emoji = "🟢" if "BUY" in signal_type else "🔴"
+    text = f"{emoji} <b>TÍN HIỆU HỆ THỐNG: {signal_type} #{symbol.upper()}</b>\n"
+    text += f"───────────────────────\n"
+    text += f"💵 <b>Giá kích hoạt:</b> <code>{price:,.0f} VNĐ</code>\n"
+    text += f"📈 <b>EMA20:</b> <code>{ema20:,.0f}</code> | <b>RSI(14):</b> <code>{rsi:.1f}</code>\n\n"
+    
+    if technical_reasons:
+        text += f"📝 <b>Lý do kỹ thuật:</b>\n{technical_reasons}\n\n"
+        
+    if trade_plan:
+        text += f"🎯 <b>Kế hoạch giao dịch:</b>\n{trade_plan}\n\n"
+
+    text += f"⚠️ <i>Tín hiệu tự động từ FinBot Backtest Model.</i>"
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        return res.status_code == 200
+    except Exception as e:
+        logger.error(f"❌ Lỗi gửi Telegram Signal: {e}")
+        return False
+
 
 # ==============================================================================
 # HÀM BỔ TRỢ: KIỂM TRA GIỜ THỊ TRƯỜNG & TẠO REPORT HTML
@@ -75,7 +118,7 @@ def is_market_closed() -> bool:
 
 
 def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, fa_data: dict, sell_eval: dict) -> str:
-    """Tạo báo cáo định dạng HTML Telegram rõ ràng, tách biệt chỉ tiêu Doanh nghiệp & Ngân hàng."""
+    """Tạo báo cáo định dạng HTML Telegram rõ ràng, chuẩn hóa theo Backtest."""
     symbol = symbol.upper()
     is_bank = fa_data.get("is_bank", False) or (symbol in BANK_SYMBOLS)
     market_closed = is_market_closed()
@@ -97,7 +140,6 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
         fa_reasons.append("Doanh nghiệp báo lỗ trong kỳ")
 
     if not is_bank:
-        # DOANH NGHIỆP THƯỜNG: Hiển thị D/E
         debt_equity = fa_data.get("debt_equity", 0.0)
         if roe < 8.0 and fa_assessment != "XẤU ❌":
             fa_assessment = "TRUNG BÌNH ⚠️"
@@ -112,9 +154,7 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
             f"  • D/E (Nợ/VCSH): <code>{debt_equity:.2f} lần</code>"
         )
     else:
-        # NGÂN HÀNG: Hiển thị NIM thay thế D/E
         nim_ratio = fa_data.get("nim_ratio", 0.0)
-
         if roe < 10.0 and fa_assessment != "XẤU ❌":
             fa_assessment = "TRUNG BÌNH ⚠️"
             fa_reasons.append(f"ROE Ngân hàng ở mức trung bình ({roe:.1f}%)")
@@ -125,7 +165,7 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
         )
 
     if not fa_reasons:
-        fa_reasons.append("Sức khỏe tài chính tốt, hoạt động kinh doanh có lãi và đạt chuẩn an toàn.")
+        fa_reasons.append("Sức khỏe tài chính tốt, hoạt động kinh doanh đạt chuẩn an toàn.")
     
     fa_comment = html.escape("; ".join(fa_reasons))
 
@@ -139,22 +179,23 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
     ta_reasons = []
 
     if current_price >= ema20:
-        ta_reasons.append("Giá duy trì trên EMA20 (Xu hướng ngắn hạn Tăng)")
+        ta_reasons.append("Giá duy trì trên EMA20 (Xu hướng tăng)")
     else:
         ta_assessment = "XẤU ❌"
         ta_reasons.append("Giá thủng EMA20 (Khả năng bước vào nhịp chỉnh)")
 
-    if rsi14 > 70:
-        ta_reasons.append("RSI đi vào vùng Quá Mua (>70)")
-    elif rsi14 < 30:
-        ta_reasons.append("RSI đi vào vùng Quá Bán (<30)")
+    # ĐIỀU KIỆN TỐI ƯU BACKTEST DÀNH CHO RSI & VOLUME
+    if rsi14 > 65:
+        ta_reasons.append(f"RSI chạm vùng rủi ro ngắn hạn ({rsi14:.1f})")
+    elif rsi14 < 40:
+        ta_reasons.append(f"RSI suy yếu ({rsi14:.1f})")
     else:
-        ta_reasons.append(f"RSI giữ mức cân bằng ({rsi14:.1f})")
+        ta_reasons.append(f"RSI vùng tích lũy bùng nổ đẹp ({rsi14:.1f})")
 
     if vol_ratio >= 1.2:
-        ta_reasons.append(f"Dòng tiền vào tốt (Vol đạt {vol_ratio:.2f}x MA20)")
+        ta_reasons.append(f"Dòng tiền xác nhận (Vol đạt {vol_ratio:.2f}x MA20)")
     else:
-        ta_reasons.append(f"Thanh khoản thấp hơn trung bình (Vol đạt {vol_ratio:.2f}x MA20)")
+        ta_reasons.append(f"Thanh khoản chưa bùng nổ (Vol đạt {vol_ratio:.2f}x MA20)")
 
     ta_metrics_str = (
         f"  • EMA20: <code>{ema20:,.0f}</code> | EMA50: <code>{ema50:,.0f}</code>\n"
@@ -164,7 +205,7 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
     
     ta_comment = "\n  - ".join([html.escape(r) for r in ta_reasons])
 
-    # 4. KHUYẾN NGHỊ & ĐÁNH GIÁ CUỐI CÙNG
+    # 4. KHUYẾN NGHỊ CUỐI CÙNG THEO TIÊU CHUẨN BACKTEST
     sell_signal = sell_eval.get("signal", "HOLD")
     scenario = sell_eval.get("scenario", "NONE")
     reason_sell = sell_eval.get("reason", "")
@@ -172,12 +213,13 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
     if sell_signal == "SELL":
         rec_title = f"🔴 <b>KHUYẾN NGHỊ: BÁN / HẠ TỶ TRỌNG</b>"
         rec_reason = f"Chạm ngưỡng vi phạm [{html.escape(scenario)}]: {html.escape(reason_sell)}"
-    elif fa_assessment == "TỐT ✅" and current_price >= ema20 and (45 <= rsi14 <= 68):
-        rec_title = f"🟢 <b>KHUYẾN NGHỊ: MUA / TÍCH LŨY</b>"
-        rec_reason = "Nền tảng tài chính tốt đồng điệu cùng xu hướng kỹ thuật tăng giá tích cực."
+    # ĐIỀU KIỆN MUA SIẾT CHẶT ĐỂ TĂNG WIN RATE: 45 <= RSI <= 60 và Vol >= 1.2
+    elif fa_assessment == "TỐT ✅" and (current_price > ema20 > ema50) and (45 <= rsi14 <= 60) and (vol_ratio >= 1.2):
+        rec_title = f"🟢 <b>KHUYẾN NGHỊ: MUA MỚI (BUY SIGNAL)</b>"
+        rec_reason = "Đồng thuận Tăng giá (Uptrend) + Dòng tiền bùng nổ + FA đạt chuẩn an toàn."
     else:
         rec_title = f"🟡 <b>KHUYẾN NGHỊ: THEO DÕI / GIỮ VỊ THẾ</b>"
-        rec_reason = "Tín hiệu chưa đủ hội tụ để mở điểm mua mới an toàn, tiếp tục quan sát."
+        rec_reason = "Tín hiệu chưa đủ hội tụ điểm mua bùng nổ tối ưu, tiếp tục quan sát."
 
     # GHÉP KHUNG TIN NHẮN HTML
     report = f"""📊 <b>PHÂN TÍCH CỔ PHIẾU #{symbol}</b>
@@ -200,7 +242,7 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
 📌 <b>Lý do:</b> {rec_reason}
 
 ───────────────────────
-⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không có tác dụng thay thế lời khuyên của chuyên gia.</i>"""
+⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không thay thế lời khuyên tài chính.</i>"""
 
     return report
 
@@ -398,6 +440,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 # ==============================================================================
 # ENTRY POINT
 # ==============================================================================
+def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -412,7 +455,9 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze_ticker))
     app.add_error_handler(global_error_handler)
 
-    # Dòng này chỉ dùng khi chạy trực tiếp file telegram_bot.py ở máy local
-if __name__ == "__main__":
     print("🚀 Đang chạy Telegram Bot độc lập...")
     app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
