@@ -52,3 +52,4 @@ source venv/bin/activate
 
 # Cài đặt các thư viện cần thiết
 pip install -r requirements.txt
+pip install flask python-telegram-bot pandas matplotlib
