@@ -1,30 +1,32 @@
 import os
-import sys
-import subprocess
+import asyncio
 from flask import Flask
+from threading import Thread
+# Import trực tiếp ứng dụng Telegram Bot từ file telegram_bot.py của bạn
+from telegram_bot import app as telegram_app
 
-app = Flask(__name__)
+flask_app = Flask(__name__)
 
-# Biến toàn cục theo dõi tiến trình của Bot
-bot_process = None
-
-def start_telegram_bot():
-    """Khởi chạy Telegram Bot dưới dạng một tiến trình ngầm duy nhất."""
-    global bot_process
-    if bot_process is None or bot_process.poll() is not None:
-        print("🚀 Đang khởi chạy Telegram Bot AI FinBot trong background...")
-        # Sử dụng sys.executable để đảm bảo dùng đúng file python của môi trường hiện tại
-        bot_process = subprocess.Popen([sys.executable, "telegram_bot.py"])
-
-@app.route('/')
+@flask_app.route('/')
 def health_check():
-    """Endpoint dùng cho các dịch vụ Cronjob (UptimeRobot, BetterUptime) ping duy trì Server 24/7."""
+    """Endpoint cho UptimeRobot / Render Health Check."""
     return "AI FinBot Webhook Server is active and running 24/7!", 200
 
-if __name__ == "__main__":
-    # 1. Khởi chạy Bot duy nhất 1 lần khi Server Flask bật
-    start_telegram_bot()
+def run_telegram_bot():
+    """Chạy Telegram Bot trong một Event Loop riêng biệt."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # 2. Lắng nghe đúng PORT do Render / Cloud Server cấp
+    # Khai báo chạy Polling trực tiếp từ Telegram App
+    telegram_app.run_polling(drop_pending_updates=True, close_loop=False)
+
+if __name__ == "__main__":
+    print("🚀 Khởi chạy Telegram Bot ngầm...")
+    # 1. Chạy Telegram Bot ở một Thread riêng
+    bot_thread = Thread(target=run_telegram_bot, daemon=True)
+    bot_thread.start()
+
+    # 2. Khởi chạy Flask Server lắng nghe PORT của Render
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    print(f"🌐 Flask Server đang lắng nghe trên port {port}...")
+    flask_app.run(host="0.0.0.0", port=port)
