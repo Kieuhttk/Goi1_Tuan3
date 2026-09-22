@@ -6,11 +6,11 @@ requests==2.31.0
 
 # --- DỮ LIỆU TÀI CHÍNH & XỬ LÝ SỐ LIỆU ---
 vnstock
-pandas==2.1.4
-numpy==1.26.2
+pandas
+numpy
 
 # --- VẼ BIỂU ĐỒ & ĐỒ HỌA ---
-matplotlib==3.8.2
+matplotlib
 
 # --- BỔ TRỢ HỆ THỐNG & HTTP ---
 pydantic==2.5.3
