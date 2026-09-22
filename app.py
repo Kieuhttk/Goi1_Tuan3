@@ -2,7 +2,8 @@ import os
 import asyncio
 from flask import Flask
 from threading import Thread
-# Import biến app đã khởi tạo từ telegram_bot.py
+
+# Import duy nhất biến Telegram app từ telegram_bot.py
 from telegram_bot import app as telegram_app
 
 flask_app = Flask(__name__)
@@ -17,7 +18,7 @@ def run_telegram_bot():
     asyncio.set_event_loop(loop)
     telegram_app.run_polling(drop_pending_updates=True, close_loop=False)
 
-# Khởi chạy Thread ngầm cho Telegram Bot ngay khi import/chạy app.py
+# Khởi chạy Thread ngầm cho Telegram Bot
 bot_thread = Thread(target=run_telegram_bot, daemon=True)
 bot_thread.start()
 

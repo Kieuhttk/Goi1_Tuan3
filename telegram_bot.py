@@ -13,7 +13,6 @@ import html
 from datetime import datetime, time as dtime
 from threading import Thread
 import app
-import app
 from flask import Flask
 
 import matplotlib
