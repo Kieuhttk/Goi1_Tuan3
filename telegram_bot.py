@@ -441,6 +441,10 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 # ENTRY POINT
 # ==============================================================================
 def main():
+    # 1. Chạy Flask Web Server ở luồng phụ (Background Thread) để lắng nghe Port
+    keep_alive()
+
+    # 2. Khởi tạo Telegram Bot
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -455,7 +459,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze_ticker))
     app.add_error_handler(global_error_handler)
 
-    print("🚀 Đang chạy Telegram Bot độc lập...")
+    print("🚀 Đang chạy Telegram Bot & Web Server...")
+    
+    # 3. Chạy Polling trên biến `app` vừa tạo bên trong hàm
     app.run_polling(drop_pending_updates=True)
 
 
