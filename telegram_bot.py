@@ -12,6 +12,8 @@ import pandas as pd
 import html
 from datetime import datetime, time as dtime
 from threading import Thread
+import app
+import app
 from flask import Flask
 
 import matplotlib
@@ -398,10 +400,6 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 # ==============================================================================
 # ENTRY POINT
 # ==============================================================================
-if __name__ == "__main__":
-    keep_alive()
-    print("🚀 Đang khởi chạy Telegram Bot AI FinBot...")
-    
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -416,5 +414,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze_ticker))
     app.add_error_handler(global_error_handler)
 
-    print("✅ FinBot đã sẵn sàng nhận lệnh từ Telegram!")
-    app.run_polling(drop_pending_updates=True, poll_interval=1.0)
+    # Dòng này chỉ dùng khi chạy trực tiếp file telegram_bot.py ở máy local
+if __name__ == "__main__":
+    print("🚀 Đang chạy Telegram Bot độc lập...")
+    app.run_polling(drop_pending_updates=True)
