@@ -1,10 +1,7 @@
 import sys
 import pandas as pd
-from data_realtime import (
-    get_clean_financial_data,
-    get_realtime_ohlcv,
-    calculate_realtime_indicators
-)
+from data_fundamental import get_clean_financial_data
+from data_realtime import calculate_realtime_indicators, get_realtime_ohlcv
 
 
 def safe_check_df(df) -> bool:

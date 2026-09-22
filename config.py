@@ -1,8 +1,12 @@
 # config.py
 
-# Thông tin API DNSE (Thay bằng thông tin thực tế của bạn)
-DNSE_API_KEY = "YOUR_DNSE_API_KEY"
-DNSE_API_SECRET = "YOUR_DNSE_API_SECRET"
-
-# Endpoint lấy dữ liệu nến / giá của DNSE (Ví dụ: Entrade X API)
+# 1. API DNSE
 DNSE_BASE_URL = "https://services.entrade.com.vn/chart-api/v2"
+
+# 2. Telegram Bot Configuration
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+
+# 3. Scanner Settings
+DEFAULT_WATCHLIST = ["HPG", "SSI", "VNM", "FPT", "TCB"]
+SCAN_INTERVAL_SECONDS = 300  # Quét lại sau mỗi 5 phút
