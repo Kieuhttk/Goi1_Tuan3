@@ -29,6 +29,8 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+# Import hàm quét từ scanner.py
+from scanner import run_market_scanner
 
 # Import module nội bộ (Tái sử dụng biến BANK_SYMBOLS để tránh trùng lặp code)
 from data_fundamental import (
@@ -61,6 +63,15 @@ PORTFOLIO_POSITIONS = {
     "VNM": 68000   # Giá vốn VNM: 68.000 VNĐ
 }
 
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý khi người dùng gõ /scan hoặc /quet trên Telegram."""
+    await update.message.reply_text("🔍 FinBot đang tiến hành quét thị trường Realtime, vui lòng đợi trong giây lát...")
+    
+    # Gọi hàm quét (truyền send_to_telegram=False để không bị gửi lặp 2 tin)
+    report_msg = run_market_scanner(send_to_telegram=False)
+    
+    # Phản hồi báo cáo trực tiếp vào cuộc trò chuyện
+    await update.message.reply_html(report_msg)
 # ==============================================================================
 # HÀM GIÚP BÁO TÍN HIỆU TỰ ĐỘNG CHO MAIN_SIGNAL_BOT
 # ==============================================================================
@@ -456,6 +467,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("trade", trade_command))
+    app.add_handler(CommandHandler("scan", scan_command))
+    app.add_handler(CommandHandler("quet", scan_command))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze_ticker))
     app.add_error_handler(global_error_handler)
 
