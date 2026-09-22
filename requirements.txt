@@ -1,18 +1,16 @@
-# --- KẾT NỐI BOT & WEB SERVER ---
+# --- CORE BOT & WEB SERVER ---
 python-telegram-bot==20.7
-flask==3.0.0
-gunicorn==21.2.0
-requests==2.31.0
+flask
+gunicorn
+requests
 
-# --- DỮ LIỆU TÀI CHÍNH & XỬ LÝ SỐ LIỆU ---
+# --- DATA SCIENCE & FINANCE ---
 vnstock
 pandas
 numpy
-
-# --- VẼ BIỂU ĐỒ & ĐỒ HỌA ---
 matplotlib
 
-# --- BỔ TRỢ HỆ THỐNG & HTTP ---
-pydantic==2.5.3
-urllib3==2.1.0
-certifi==2023.11.17
+# --- SYSTEM DEPENDENCIES ---
+pydantic
+urllib3
+certifi
