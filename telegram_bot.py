@@ -14,13 +14,14 @@ import pandas as pd
 import html
 import requests
 from datetime import datetime, time as dtime
+import pytz
 from threading import Thread
 from flask import Flask
-
+import zoneinfo
 import matplotlib
 matplotlib.use('Agg')  # Chế độ chạy nền không xuất hiện GUI window
 import matplotlib.pyplot as plt
-
+import matplotlib.gridspec as gridspec
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -72,9 +73,139 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Phản hồi báo cáo trực tiếp vào cuộc trò chuyện
     await update.message.reply_html(report_msg)
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if not args:
+        await update.message.reply_text("⚠️ Cú pháp: <code>/buy &lt;MÃ_CỔ_PHIẾU&gt;</code>\nVD: <code>/buy HPG</code>", parse_mode="HTML")
+        return
+
+    symbol = args[0].strip().upper()
+    msg = await update.message.reply_text(f"📊 Đang tính toán kế hoạch giải ngân cho mã #{symbol}...")
+
+    try:
+        df_p = get_realtime_ohlcv(symbol, limit=60, resolution="1D")
+        if df_p is None or df_p.empty:
+            await msg.edit_text(f"⚠️ Không lấy được dữ liệu nến cho mã <code>{symbol}</code>.", parse_mode="HTML")
+            return
+
+        df_ind = calculate_realtime_indicators(df_p)
+        latest = df_ind.iloc[-1]
+
+        raw_price = float(latest.get("close", 0))
+        price_vnd = raw_price * 1000.0 if raw_price < 1000 else raw_price
+        
+        raw_ma20 = float(latest.get("ma20", 0))
+        ma20_vnd = raw_ma20 * 1000.0 if raw_ma20 < 1000 else raw_ma20
+
+        raw_upper = float(latest.get("upper_band", 0))
+        upper_vnd = raw_upper * 1000.0 if raw_upper < 1000 else raw_upper
+
+        raw_lower = float(latest.get("lower_band", 0))
+        lower_vnd = raw_lower * 1000.0 if raw_lower < 1000 else raw_lower
+
+        rsi14 = float(latest.get("rsi14", 0))
+
+        levels = calculate_buy_levels(symbol, price_vnd, lower_vnd, ma20_vnd, upper_vnd)
+        time_str = get_current_time_str()
+        report = (
+            f"🎯 <b>KẾ HOẠCH GIẢI NGÂN BẮT ĐÁY #{symbol}</b>\n"
+            f"<i>Cập nhật realtime: {time_str}</i>\n"
+            f"═══════════════════════════════\n"
+            f"💰 <b>Giá hiện tại:</b> <code>{price_vnd:,.0f} VNĐ</code> | RSI(14): <code>{rsi14:.1f}</code>\n"
+            f"📉 <b>Lower Band:</b> <code>{lower_vnd:,.0f}</code> | MA20: <code>{ma20_vnd:,.0f}</code>\n\n"
+            f"📥 <b>CHIẾN LƯỢC GIẢI NGÂN DCA 3 TẦNG:</b>\n"
+            f" ├ <b>Vùng 1 (Giải ngân 30% Vốn):</b> <code>{levels['vung_1']:,.0f} VNĐ</code>\n"
+            f" │  👉 <i>Thăm dò khi giá chạm/ép sát Lower Band.</i>\n"
+            f" ├ <b>Vùng 2 (Giải ngân 40% Vốn):</b> <code>{levels['vung_2']:,.0f} VNĐ</code>\n"
+            f" │  👉 <i>Bắt đáy mạnh khi bị hoảng loạn ép thủng sâu Lower Band.</i>\n"
+            f" └ <b>Vùng 3 (Gia tăng 30% Vốn còn lại):</b>\n"
+            f"    👉 <i>Mua gia tăng khi giá quay đầu vượt lại lên trên dải Lower Band (hoặc EMA9/MA20) xác nhận rút chân với khối lượng lớn.</i>\n\n"
+            f"🛡️ <b>QUẢN TRỊ RỦI RO & CHỐT LỜI:</b>\n"
+            f" ├ 🔴 <b>Cắt lỗ (Stop Loss):</b> <code>{levels['stop_loss']:,.0f} VNĐ</code> (Thủng sâu Vùng 2)\n"
+            f" ├ 🟢 <b>Mục tiêu 1 (Chốt lời 50%):</b> <code>{levels['tp1']:,.0f} VNĐ</code> (Chạm MA20)\n"
+            f" └ 🚀 <b>Mục tiêu 2 (Chốt hết):</b> <code>{levels['tp2']:,.0f} VNĐ</code> (Chạm Upper Band)\n\n"
+            f"----------------------------------------\n"
+            f"⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không thay thế lời khuyên tài chính.</i>"
+        )
+
+        await msg.edit_text(report, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Lỗi tính vùng mua mã {symbol}: {e}")
+        await msg.edit_text(f"❌ Có lỗi xảy ra khi tính kế hoạch mua cho mã {symbol}.")
+
+async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("🔍 Đang kiểm tra sức khỏe thị trường VN-Index...")
+
+    try:
+        df_vni = get_realtime_ohlcv("VNINDEX", limit=60, resolution="1D")
+        if df_vni is None or df_vni.empty:
+            df_vni = get_realtime_ohlcv("VN-INDEX", limit=60, resolution="1D")
+
+        if df_vni is None or df_vni.empty:
+            await msg.edit_text("⚠️ Không lấy được dữ liệu chỉ số VN-Index Realtime.")
+            return
+
+        df_ind = calculate_realtime_indicators(df_vni)
+        latest = df_ind.iloc[-1]
+
+        vni_close = float(latest.get("close", 0))
+        vni_ma20 = float(latest.get("ma20", 0))
+        vni_lower = float(latest.get("lower_band", 0))
+        vni_upper = float(latest.get("upper_band", 0))
+        vni_rsi = float(latest.get("rsi14", 0))
+
+        # ĐÁNH GIÁ VÀ PHÂN TÁCH NHÓM CỔ PHIẾU CHI TIẾT
+        if vni_close < vni_lower * 0.98 and vni_rsi < 30:
+            status = "🚨 <b>THỊ TRƯỜNG BÁN THÁO HOẢNG LOẠN (PANIC SELL)</b>"
+            advice = "🛑 <b>Khuyến nghị:</b> TẠM DỪNG mở vị thế mua bắt đáy mới ở TẤT CẢ các nhóm ngành để quản trị an toàn vốn."
+        elif vni_close <= vni_lower * 1.01:
+            status = "🟡 <b>THỊ TRƯỜNG ÉP DẢI DƯỚI (VÙNG SẮP ĐẢO CHUYỀN)</b>"
+            advice = (
+                "🎯 <b>Khuyến nghị:</b>\n"
+                " ├ <b>Ưu tiên:</b> Quan sát nhóm cổ phiếu trụ thuộc nhóm Bất động sản/Sản xuất có dòng tiền khỏe "
+                "(ngừng rơi trước thị trường) tại Lower Band để giải ngân DCA nhẹ.\n"
+                " └ <b>Hạn chế:</b> Tạm thời đứng ngoài nhóm Ngân hàng đang có sự phân hóa mạnh."
+            )
+        elif vni_close >= vni_ma20:
+            status = "🟢 <b>THỊ TRƯỜNG TÍCH LŨY CÂN BẰNG / UPTREND</b>"
+            advice = "✅ <b>Khuyến nghị:</b> An toàn để gia tăng tỷ trọng lướt sóng các mã có nền giá tích lũy trên MA20."
+        else:
+            status = "🟠 <b>THỊ TRƯỜNG ĐANG TRONG NHỊP ĐIỀU CHỈNH</b>"
+            advice = (
+                "👀 <b>Khuyến nghị:</b> Quan sát nhóm cổ phiếu trụ thuộc nhóm Bất động sản/Sản xuất có dòng tiền khỏe "
+                "(ngừng rơi trước thị trường) tại Lower Band, hạn chế giải ngân nhóm Ngân hàng đang phân hóa."
+            )
+        time_str = get_current_time_str()
+        report = (
+            f"🏛️ <b>BÁO CÁO SỨC KHỎE THỊ TRƯỜNG VN-INDEX</b>\n"
+            f"<i>Cập nhật realtime: {time_str}</i>\n"
+            f"═══════════════════════════════\n"
+            f"📊 <b>Điểm số:</b> <code>{vni_close:,.2f}</code> | RSI(14): <code>{vni_rsi:.1f}</code>\n"
+            f"├ MA20: <code>{vni_ma20:,.2f}</code>\n"
+            f"├ Lower Band: <code>{vni_lower:,.2f}</code>\n"
+            f"└ Upper Band: <code>{vni_upper:,.2f}</code>\n\n"
+            f"🚦 <b>Trạng thái:</b> {status}\n\n"
+            f"💡 {advice}\n\n"
+            f"----------------------------------------\n"
+            f"⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không thay thế lời khuyên tài chính.</i>"
+        )
+
+        await msg.edit_text(report, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Lỗi kiểm tra thị trường VN-Index: {e}")
+        await msg.edit_text("❌ Lỗi hệ thống khi kiểm tra thông số VN-Index.")
+
 # ==============================================================================
 # HÀM GIÚP BÁO TÍN HIỆU TỰ ĐỘNG CHO MAIN_SIGNAL_BOT
 # ==============================================================================
+def get_current_time_str() -> str:
+    """Lấy thời gian realtime hiện tại theo chuẩn múi giờ Việt Nam (Asia/Ho_Chi_Minh)."""
+    tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    now = datetime.now(tz)
+    return now.strftime("%d/%m/%Y %H:%M:%S")
+
 def send_telegram_signal(symbol: str, signal_type: str, price: float, ema20: float, rsi: float, fund_info: dict, technical_reasons: str = "", trade_plan: str = ""):
     """Hàm gửi tín hiệu Mua/Bán tự động qua Telegram API Sync cho main_signal_bot."""
     if not BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -114,19 +245,62 @@ def send_telegram_signal(symbol: str, signal_type: str, price: float, ema20: flo
 # ==============================================================================
 # HÀM BỔ TRỢ: KIỂM TRA GIỜ THỊ TRƯỜNG & TẠO REPORT HTML
 # ==============================================================================
-def is_market_closed() -> bool:
-    """Kiểm tra xem thị trường chứng khoán Việt Nam hiện tại đã đóng cửa chưa."""
-    now = datetime.now()
-    if now.weekday() >= 5:  # Thứ 7 hoặc Chủ Nhật
-        return True
-    
-    market_close_time = dtime(15, 0, 0)
-    market_open_time = dtime(9, 0, 0)
-    
-    if now.time() > market_close_time or now.time() < market_open_time:
-        return True
-    return False
+def is_market_hours() -> bool:
+    """Kiểm tra xem hiện tại có đang trong giờ giao dịch không (T2-T6: 9h-11h30 & 13h-15h)"""
+    try:
+        tz_vn = zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")
+        now = datetime.now(tz_vn)
+    except Exception:
+        now = datetime.now()
 
+    # Thứ 7 (5) hoặc Chủ Nhật (6)
+    if now.weekday() >= 5:
+        return False
+
+    current_time = now.time()
+    session1_start = datetime.strptime("09:00", "%H:%M").time()
+    session1_end = datetime.strptime("11:30", "%H:%M").time()
+    session2_start = datetime.strptime("13:00", "%H:%M").time()
+    session2_end = datetime.strptime("15:00", "%H:%M").time()
+
+    return (session1_start <= current_time <= session1_end) or (session2_start <= current_time <= session2_end)
+
+def is_market_closed() -> bool:
+    """Trả về True nếu thị trường đã đóng cửa (ngoài giờ giao dịch)"""
+    return not is_market_hours()
+
+def get_price_label_html() -> str:
+    """Tạo nhãn giá hiển thị ngày giờ chuẩn định dạng HTML cho Telegram"""
+    try:
+        tz_vn = zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")
+        updated_now = datetime.now(tz_vn).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        updated_now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    if is_market_hours():
+        return f"Giá hiện tại ({updated_now})"
+    else:
+        return f"Giá đóng cửa ({updated_now})"
+
+def calculate_buy_levels(ticker: str, current_price: float, lower_band: float, ma20: float, upper_band: float) -> dict:
+    base_lower = lower_band if lower_band > 0 else current_price * 0.96
+    
+    # Mức giá tham chiếu Vùng 1 & 2
+    vung_1 = base_lower * 1.005        # Thăm dò sát Lower Band
+    vung_2 = base_lower * 0.970        # Bắt đáy khi ép thủng sâu Lower Band 3%
+
+    # Ngưỡng Chốt lời / Cắt lỗ
+    stop_loss = vung_2 * 0.95
+    take_profit_1 = ma20 if ma20 > 0 else current_price * 1.06
+    take_profit_2 = upper_band if upper_band > 0 else current_price * 1.12
+
+    return {
+        "vung_1": vung_1,
+        "vung_2": vung_2,
+        "stop_loss": stop_loss,
+        "tp1": take_profit_1,
+        "tp2": take_profit_2
+    }
 
 def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, fa_data: dict, sell_eval: dict) -> str:
     """Tạo báo cáo định dạng HTML Telegram rõ ràng, chuẩn hóa theo Backtest."""
@@ -135,8 +309,16 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
     market_closed = is_market_closed()
 
     # 1. GIÁ HIỆN TẠI / ĐÓNG CỬA
-    price_label = "Giá đóng cửa" if market_closed else "Giá hiện tại"
-    price_fmt = f"<code>{current_price:,.0f} VNĐ</code>"
+    try:
+        tz_vn = zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")
+        updated_now = datetime.now(tz_vn).strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        updated_now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+    if market_closed:
+        price_label = f"Giá đóng cửa ({updated_now})"
+    else:
+        price_label = f"Giá hiện tại ({updated_now})"
 
     # 2. PHÂN TÍCH CƠ BẢN (FA)
     roe = fa_data.get("roe_annualized", 0.0)
@@ -177,86 +359,125 @@ def build_pretty_html_report(symbol: str, current_price: float, ta_data: dict, f
 
     if not fa_reasons:
         fa_reasons.append("Sức khỏe tài chính tốt, hoạt động kinh doanh đạt chuẩn an toàn.")
-    
+
     fa_comment = html.escape("; ".join(fa_reasons))
 
-    # 3. PHÂN TÍCH KĨ THUẬT (TA)
-    ema20 = ta_data.get("ema20", 0.0)
-    ema50 = ta_data.get("ema50", 0.0)
+    # 3. PHÂN TÍCH KỸ THUẬT (TA) - STRATEGY: MEAN REVERSION (BOLLINGER BANDS + RSI)
+    ma20 = ta_data.get("ma20", 0.0)
+    upper_band = ta_data.get("upper_band", 0.0)
+    lower_band = ta_data.get("lower_band", 0.0)
     rsi14 = ta_data.get("rsi14", 0.0)
-    vol_ratio = ta_data.get("volume_ratio", 0.0)
+    prev_rsi14 = ta_data.get("prev_rsi14", 0.0)
 
-    ta_assessment = "TỐT ✅"
+    ta_assessment = "TRUNG BÌNH ⚠️"
     ta_reasons = []
 
-    if current_price >= ema20:
-        ta_reasons.append("Giá duy trì trên EMA20 (Xu hướng tăng)")
+    # --- ĐÁNH GIÁ VỊ TRÍ GIÁ SO VỚI BOLLINGER BANDS ---
+    if lower_band > 0 and current_price <= lower_band * 1.01:
+        ta_reasons.append("Giá ép sát/thủng Dải Dưới (Lower Band) — Vùng quá bán")
+    elif upper_band > 0 and current_price >= upper_band * 0.99:
+        ta_reasons.append("Giá chạm/vượt Dải Trên (Upper Band) — Vùng quá mua ngắn hạn")
+    elif ma20 > 0 and current_price >= ma20:
+        ta_reasons.append("Giá nằm trên MA20 (Nền giá tích lũy cân bằng)")
     else:
-        ta_assessment = "XẤU ❌"
-        ta_reasons.append("Giá thủng EMA20 (Khả năng bước vào nhịp chỉnh)")
+        ta_reasons.append("Giá nằm dưới MA20 (Đang trong nhịp điều chỉnh)")
 
-    # ĐIỀU KIỆN TỐI ƯU BACKTEST DÀNH CHO RSI & VOLUME
-    if rsi14 > 65:
-        ta_reasons.append(f"RSI chạm vùng rủi ro ngắn hạn ({rsi14:.1f})")
-    elif rsi14 < 40:
-        ta_reasons.append(f"RSI suy yếu ({rsi14:.1f})")
+    # --- ĐÁNH GIÁ CHỈ BÁO RSI(14) & TÍN HIỆU ĐẢO CHUYỂN ---
+    if rsi14 <= 35:
+        ta_reasons.append(f"RSI lọt vùng Quá Bán sâu ({rsi14:.1f}) — Cơ hội bắt đáy cao")
+    elif rsi14 <= 42:
+        ta_reasons.append(f"RSI chạm vùng Quá Bán ({rsi14:.1f})")
+    elif rsi14 >= 65:
+        ta_reasons.append(f"RSI vào vùng Quá Mua rủi ro ({rsi14:.1f}) — Ưu tiên chốt lời")
     else:
-        ta_reasons.append(f"RSI vùng tích lũy bùng nổ đẹp ({rsi14:.1f})")
+        ta_reasons.append(f"RSI ở trạng thái Trung tính ({rsi14:.1f})")
 
-    if vol_ratio >= 1.2:
-        ta_reasons.append(f"Dòng tiền xác nhận (Vol đạt {vol_ratio:.2f}x MA20)")
-    else:
-        ta_reasons.append(f"Thanh khoản chưa bùng nổ (Vol đạt {vol_ratio:.2f}x MA20)")
+    # Kiểm tra nến rút chân / RSI móc lên
+    if rsi14 > prev_rsi14 and current_price <= lower_band * 1.02:
+        ta_reasons.append(f"RSI có tín hiệu MÓC LÊN ({prev_rsi14:.1f} ↗️ {rsi14:.1f}) tại vùng đáy")
 
+    # --- ĐÁNH GIÁ TỔNG THỂ TA METRICS ---
+    if (current_price <= lower_band * 1.01) and (rsi14 <= 42):
+        ta_assessment = "TỐT ✅ (VÙNG MUA BẮT ĐÁY)"
+    elif (current_price >= upper_band * 0.99) or (rsi14 >= 65):
+        ta_assessment = "XẤU ❌ (VÙNG CHỐT LỜI/RỦI RO)"
+
+    # Chuỗi hiển thị chỉ báo kỹ thuật gửi qua Telegram
     ta_metrics_str = (
-        f"  • EMA20: <code>{ema20:,.0f}</code> | EMA50: <code>{ema50:,.0f}</code>\n"
-        f"  • RSI(14): <code>{rsi14:.1f}</code>\n"
-        f"  • Volume / MA20: <code>{vol_ratio:.2f}x</code>"
+        f"  • MA20: <code>{ma20:,.0f}</code>\n"
+        f"  • Lower Band: <code>{lower_band:,.0f}</code> | Upper Band: <code>{upper_band:,.0f}</code>\n"
+        f"  • RSI(14): <code>{rsi14:.1f}</code> (Trước: <code>{prev_rsi14:.1f}</code>)"
     )
-    
-    ta_comment = "\n  - ".join([html.escape(r) for r in ta_reasons])
 
-    # 4. KHUYẾN NGHỊ CUỐI CÙNG THEO TIÊU CHUẨN BACKTEST
+    ta_comment = "\n  - ".join([html.escape(r) for r in ta_reasons])
+# 4. KHUYẾN NGHỊ CUỐI CÙNG (MEAN REVERSION STRATEGY)
     sell_signal = sell_eval.get("signal", "HOLD")
     scenario = sell_eval.get("scenario", "NONE")
     reason_sell = sell_eval.get("reason", "")
 
+    # Lấy tham số cho chiến lược BB + RSI
+    lower_band = ta_data.get("lower_band", 0.0)
+    upper_band = ta_data.get("upper_band", 0.0)
+    ma20 = ta_data.get("ma20", 0.0)
+    rsi14 = ta_data.get("rsi14", 0.0)
+    prev_rsi14 = ta_data.get("prev_rsi14", 0.0)
+
+    # ĐIỀU KIỆN KỸ THUẬT MEAN REVERSION
+    is_buy_bb = (lower_band > 0) and (current_price <= lower_band * 1.01)  # Ép sát/thủng dải dưới
+    is_buy_rsi = (rsi14 <= 42.0)                                           # RSI quá bán
+    is_rsi_rebound = (rsi14 > prev_rsi14)                                  # RSI móc lên đảo chiều
+
+    is_take_profit_bb = (upper_band > 0) and (current_price >= upper_band * 0.99)  # Tiệm cận dải trên
+    is_overbought_rsi = (rsi14 >= 65.0)                                           # RSI quá mua
+
+    # --- ĐÁNH GIÁ VÀ ĐƯA RA KHUYẾN NGHỊ ---
+    # 1. Bán do Quản trị rủi ro / Danh mục vi phạm
     if sell_signal == "SELL":
-        rec_title = f"🔴 <b>KHUYẾN NGHỊ: BÁN / HẠ TỶ TRỌNG</b>"
-        rec_reason = f"Chạm ngưỡng vi phạm [{html.escape(scenario)}]: {html.escape(reason_sell)}"
-    # ĐIỀU KIỆN MUA SIẾT CHẶT ĐỂ TĂNG WIN RATE: 45 <= RSI <= 60 và Vol >= 1.2
-    elif fa_assessment == "TỐT ✅" and (current_price > ema20 > ema50) and (45 <= rsi14 <= 60) and (vol_ratio >= 1.2):
-        rec_title = f"🟢 <b>KHUYẾN NGHỊ: MUA MỚI (BUY SIGNAL)</b>"
-        rec_reason = "Đồng thuận Tăng giá (Uptrend) + Dòng tiền bùng nổ + FA đạt chuẩn an toàn."
+        rec_title = "🔴 <b>KHUYẾN NGHỊ: BÁN CẮT LỖ / QUẢN TRỊ RỦI RO</b>"
+        rec_reason = f"Vi phạm ngưỡng an toàn [{html.escape(scenario)}]: {html.escape(reason_sell)}"
+
+    # 2. Bán do Chốt lời kỹ thuật (Chạm Upper Band hoặc RSI Quá mua)
+    elif is_take_profit_bb or is_overbought_rsi:
+        rec_title = "🔴 <b>KHUYẾN NGHỊ: CHỐT LỜI / HẠ TỶ TRỌNG</b>"
+        rec_reason = f"Giá tiến vào vùng Quá Mua rủi ro ngắn hạn (Upper Band: {upper_band:,.0f} | RSI: {rsi14:.1f})."
+
+    # 3. Mua mới / Bắt đáy chuẩn Mean Reversion
+    elif fa_assessment == "TỐT ✅" and is_buy_bb and is_buy_rsi and is_rsi_rebound:
+        rec_title = "🟢 <b>KHUYẾN NGHỊ: MUA MỚI (BUY SIGNAL)</b>"
+        rec_reason = f"Nền tảng FA tốt + Bắt đáy Bollinger Bands thành công (RSI {rsi14:.1f} có tín hiệu móc đầu đi lên)."
+
+    # 4. Theo dõi / Canh mua (Giá đã sát đáy nhưng chưa xác nhận RSI đảo chiều)
+    elif is_buy_bb and is_buy_rsi:
+        rec_title = "🟡 <b>KHUYẾN NGHỊ: CANH MUA (WATCHLIST)</b>"
+        rec_reason = "Giá đã đi vào vùng Quá Bán sát dải dưới BB, chờ nến xanh xác nhận đảo chiều để MUA."
+
+    # 5. Nắm giữ / Theo dõi
     else:
-        rec_title = f"🟡 <b>KHUYẾN NGHỊ: THEO DÕI / GIỮ VỊ THẾ</b>"
-        rec_reason = "Tín hiệu chưa đủ hội tụ điểm mua bùng nổ tối ưu, tiếp tục quan sát."
+        rec_title = "⚪ <b>KHUYẾN NGHỊ: THEO DÕI / GIỮ VỊ THẾ</b>"
+        rec_reason = "Giá đang dao động trung tính trong dải Bollinger Bands, chưa xuất hiện điểm giao dịch tối ưu."
 
-    # GHÉP KHUNG TIN NHẮN HTML
-    report = f"""📊 <b>PHÂN TÍCH CỔ PHIẾU #{symbol}</b>
-───────────────────────
-💰 <b>{price_label}:</b> {price_fmt}
-
-🏢 <b>1. PHÂN TÍCH CƠ BẢN (FA - {period}):</b>
-{fa_metrics_str}
-👉 <b>Đánh giá:</b> <b>{fa_assessment}</b>
-💬 <i>Nhận xét: {fa_comment}</i>
-
-📈 <b>2. PHÂN TÍCH KỸ THUẬT (TA):</b>
-{ta_metrics_str}
-👉 <b>Đánh giá:</b> <b>{ta_assessment}</b>
-💬 <i>Nhận xét:</i>
-  - {ta_comment}
-
-🎯 <b>3. KHUYẾN NGHỊ ĐẦU TƯ:</b>
-{rec_title}
-📌 <b>Lý do:</b> {rec_reason}
-
-───────────────────────
-⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không thay thế lời khuyên tài chính.</i>"""
+    # 6. GHÉP CHUỖI VÀ RETURN Ở CUỐI HÀM
+    report = (
+        f"📊 <b>PHÂN TÍCH CỔ PHIẾU #{symbol}</b>\n"
+        f"----------------------------------------\n"
+        f"💰 <b>{price_label}:</b> <code>{current_price:,.0f} VNĐ</code>\n\n"
+        f"🏢 <b>1. PHÂN TÍCH CƠ BẢN (FA - {period}):</b>\n"
+        f"{fa_metrics_str}\n"
+        f"👉 <b>Đánh giá:</b> <b>{fa_assessment}</b>\n"
+        f"💬 <i>Nhận xét: {fa_comment}</i>\n\n"
+        f"📈 <b>2. PHÂN TÍCH KỸ THUẬT (TA):</b>\n"
+        f"{ta_metrics_str}\n"
+        f"👉 <b>Đánh giá:</b> <b>{ta_assessment}</b>\n"
+        f"💬 <i>Nhận xét:</i>\n"
+        f"  - {ta_comment}\n\n"
+        f"🎯 <b>3. KHUYẾN NGHỊ ĐẦU TƯ:</b>\n"
+        f"{rec_title}\n"
+        f"📌 <b>Lý do:</b> {rec_reason}\n\n"
+        f"----------------------------------------\n"
+        f"⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không thay thế lời khuyên tài chính.</i>"
+    )
 
     return report
-
 
 # ==============================================================================
 # HÀM GIẢ LẬP GIAO DỊCH & WEB SERVER KHỞI CHẠY
@@ -291,36 +512,77 @@ def keep_alive():
 # HÀM VẼ BIỂU ĐỒ KỸ THUẬT (TA CHART)
 # ==============================================================================
 def generate_chart(df: pd.DataFrame, symbol: str) -> str:
-    """Vẽ biểu đồ Giá, EMA20 và RSI, xuất file temp_symbol.png."""
+    """Vẽ biểu đồ TA nền trắng sáng (Light Theme) trực quan chuyên nghiệp."""
     chart_filename = f"temp_{symbol}.png"
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={'height_ratios': [2.5, 1]})
-    fig.patch.set_facecolor('#1e1e1e')
-    
-    ax1.set_facecolor('#1e1e1e')
-    close_series = df['close'] / 1000.0 if df['close'].iloc[-1] > 1000 else df['close']
-    ema20_series = df['ema20'] / 1000.0 if 'ema20' in df.columns and df['ema20'].iloc[-1] > 1000 else df.get('ema20', pd.Series())
+    BANK_CODES = ["ACB", "TCB", "MBB", "STB", "VCB", "CTG", "BID", "HDB", "VPB", "TPB"]
+    is_bank = symbol in BANK_CODES
 
-    ax1.plot(close_series.values, label='Giá đóng cửa', color='#00e676', linewidth=2)
-    if not ema20_series.empty:
-        ax1.plot(ema20_series.values, label='EMA20', color='#ff9100', linestyle='--', linewidth=1.5)
+    df = df.copy()
+    scale = 1000.0 if df['close'].iloc[-1] > 1000 else 1.0
     
-    ax1.set_title(f"Biểu đồ Phân tích Kỹ thuật #{symbol}", color='white', fontsize=14, fontweight='bold')
-    ax1.legend(loc='upper left', facecolor='#2a2a2a', edgecolor='none', labelcolor='white')
-    ax1.tick_params(colors='white')
-    ax1.grid(True, linestyle=':', alpha=0.3)
+    close_s = df['close'] / scale
+    ma20_s = df.get('ma20', pd.Series(dtype=float)) / scale
+    upper_s = df.get('upper_band', pd.Series(dtype=float)) / scale
+    lower_s = df.get('lower_band', pd.Series(dtype=float)) / scale
 
-    ax2.set_facecolor('#1e1e1e')
+    # Nền trắng chuẩn
+    fig = plt.figure(figsize=(10, 7), facecolor='#ffffff')
+    gs = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.18)
+    
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax3 = fig.add_subplot(gs[2], sharex=ax1)
+
+    # KHUNG 1: NỀN GIÁ & BOLLINGER BANDS
+    ax1.set_facecolor('#ffffff')
+    ax1.plot(close_s.values, label='Giá đóng cửa', color='#0d47a1', linewidth=2.0, zorder=4)
+    
+    if not ma20_s.empty:
+        ax1.plot(ma20_s.values, label='MA20', color='#e65100', linestyle='--', linewidth=1.2)
+    if not upper_s.empty and not lower_s.empty:
+        ax1.plot(upper_s.values, label='Upper Band', color='#c62828', linestyle=':', linewidth=1.0)
+        ax1.plot(lower_s.values, label='Lower Band', color='#2e7d32', linestyle=':', linewidth=1.0)
+        ax1.fill_between(range(len(df)), lower_s.values, upper_s.values, color='#bbdefb', alpha=0.25)
+
+    title_tag = " [BANK - Biên độ hẹp]" if is_bank else " [NON-BANK - Beta cao]"
+    ax1.set_title(f"Biểu đồ Phân tích #{symbol}{title_tag}", color='#111111', fontsize=13, fontweight='bold', pad=10)
+    ax1.legend(loc='upper left', facecolor='#f5f5f5', edgecolor='#cccccc', labelcolor='#111111', fontsize=8)
+    ax1.tick_params(colors='#111111', labelbottom=False)
+    ax1.grid(True, linestyle=':', alpha=0.5, color='#b0bec5')
+
+    # KHUNG 2: RSI(14)
+    ax2.set_facecolor('#ffffff')
     if 'rsi14' in df.columns:
-        ax2.plot(df['rsi14'].values, color='#29b6f6', label='RSI(14)', linewidth=1.5)
-        ax2.axhline(70, color='#ff5252', linestyle=':', alpha=0.7)
-        ax2.axhline(30, color='#69f0ae', linestyle=':', alpha=0.7)
-        ax2.axhline(50, color='gray', linestyle='--', alpha=0.5)
+        ax2.plot(df['rsi14'].values, color='#0288d1', label='RSI(14)', linewidth=1.5)
+        
+        rsi_oversold = 35.0 if is_bank else 30.0
+        rsi_overbought = 65.0 if is_bank else 70.0
 
-    ax2.set_ylim(0, 100)
-    ax2.tick_params(colors='white')
-    ax2.grid(True, linestyle=':', alpha=0.3)
-    ax2.legend(loc='upper left', facecolor='#2a2a2a', edgecolor='none', labelcolor='white')
+        ax2.axhline(rsi_overbought, color='#c62828', linestyle='--', alpha=0.7, label=f'Quá Mua ({rsi_overbought:.0f})')
+        ax2.axhline(rsi_oversold, color='#2e7d32', linestyle='--', alpha=0.7, label=f'Quá Bán ({rsi_oversold:.0f})')
+        ax2.axhline(50, color='gray', linestyle=':', alpha=0.5)
+
+        ax2.fill_between(range(len(df)), df['rsi14'].values, rsi_oversold, 
+                         where=(df['rsi14'].values <= rsi_oversold), color='#a5d6a7', alpha=0.5)
+
+    ax2.set_ylim(10, 90)
+    ax2.tick_params(colors='#111111', labelbottom=False)
+    ax2.grid(True, linestyle=':', alpha=0.5, color='#b0bec5')
+    ax2.legend(loc='upper left', facecolor='#f5f5f5', edgecolor='#cccccc', labelcolor='#111111', fontsize=8)
+
+    # KHUNG 3: VOLUME
+    ax3.set_facecolor('#ffffff')
+    if 'volume' in df.columns:
+        colors = ['#2e7d32' if df['close'].iloc[i] >= df['open'].iloc[i] else '#c62828' for i in range(len(df))]
+        ax3.bar(range(len(df)), df['volume'].values, color=colors, alpha=0.75, width=0.7)
+        
+        vol_ma20 = df['volume'].rolling(20).mean()
+        ax3.plot(vol_ma20.values, color='#e65100', linewidth=1.2, label='Vol MA20')
+
+    ax3.tick_params(colors='#111111')
+    ax3.grid(True, linestyle=':', alpha=0.5, color='#b0bec5')
+    ax3.legend(loc='upper left', facecolor='#f5f5f5', edgecolor='#cccccc', labelcolor='#111111', fontsize=8)
 
     plt.tight_layout()
     plt.savefig(chart_filename, dpi=150, facecolor=fig.get_facecolor(), edgecolor='none')
@@ -334,8 +596,24 @@ def generate_chart(df: pd.DataFrame, symbol: str) -> str:
 # ==============================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "🤖 <b>Chào mừng bạn đến với AI FinBot!</b>\n\n"
-        "Nhập mã cổ phiếu (VD: <code>VIC</code>, <code>HPG</code>, <code>ACB</code>) để nhận báo cáo phân tích FA/TA tự động."
+        "🤖 <b>CHÀO MỪNG BẠN ĐẾN VỚI AI FINBOT!</b>\n"
+        "<i>Trợ lý phân tích & Quản trị giao dịch chứng khoán thông minh</i>\n"
+        "═══════════════════════════════\n\n"
+        "📌 <b>CÁC TÍNH NĂNG CHÍNH CỦA BOT:</b>\n\n"
+        "1️⃣ <b>Phân Tích Cổ Phiếu Tự Động (FA + TA):</b>\n"
+        " └ Gõ trực tiếp Mã cổ phiếu (Ví dụ: <code>HPG</code>, <code>SSI</code>, <code>VCB</code>).\n"
+        " └ Nhận Báo cáo sức khỏe doanh nghiệp + Chỉ báo kỹ thuật + Biểu đồ trực quan.\n\n"
+        "2️⃣ <b>Kế Hoạch Giải Ngân & Vùng Mua Bắt Đáy:</b>\n"
+        " └ Cú pháp: <code>/buy &lt;MÃ&gt;</code> (Ví dụ: <code>/buy HPG</code>).\n"
+        " └ Tính toán 3 mốc chia vốn DCA, điểm Cắt lỗ & Chốt lời tự động.\n\n"
+        "3️⃣ <b>Soi Lọc Sức Khỏe Thị Trường Chung:</b>\n"
+        " └ Cú pháp: <code>/market</code> hoặc <code>/vnindex</code>.\n"
+        " └ Đánh giá mức độ an toàn của VN-Index trước khi ra quyết định bắt đáy.\n\n"
+        "4️⃣ <b>Quét Tín Hiệu Mua/Bán Realtime:</b>\n"
+        " └ Cú pháp: <code>/scan</code> hoặc <code>/quet</code>.\n"
+        " └ Quét toàn bộ danh mục theo chiến lược Bollinger Bands & RSI Quá bán.\n\n"
+        "----------------------------------------\n"
+        "⚠️ <i><b>Disclaimer:</b> FinBot không phải là chuyên gia đầu tư, không thay thế lời khuyên tài chính.</i>"
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
@@ -353,39 +631,45 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fa_data = get_clean_financial_data(symbol)
         df_p = get_realtime_ohlcv(symbol, limit=60, resolution="1D")
 
-        if df_p is None or df_p.empty:
-            await msg.edit_text(f"⚠️ Không tìm thấy dữ liệu giá Realtime cho mã <code>{symbol}</code>.", parse_mode="HTML")
+        if df_p is None or df_p.empty or len(df_p) < 20:
+            await msg.edit_text(f"⚠️ Không tìm thấy hoặc thiếu dữ liệu nến Realtime cho mã <code>{symbol}</code>.", parse_mode="HTML")
             return
 
+        # Tính toán chỉ báo (đã chứa MA20, Upper Band, Lower Band, RSI14)
         df_ind = calculate_realtime_indicators(df_p)
         latest = df_ind.iloc[-1]
+        previous = df_ind.iloc[-2]  # Lấy thêm nến kế trước để soi RSI móc lên
 
+        # Chuẩn hóa đơn vị giá (chuyển về VNĐ)
         raw_price = float(latest.get("close", 0))
         price_vnd = raw_price * 1000.0 if raw_price < 1000 else raw_price
         
-        raw_ema20 = float(latest.get("ema20", 0))
-        ema20_vnd = raw_ema20 * 1000.0 if raw_ema20 < 1000 else raw_ema20
+        raw_ma20 = float(latest.get("ma20", 0))
+        ma20_vnd = raw_ma20 * 1000.0 if raw_ma20 < 1000 else raw_ma20
 
-        raw_ema50 = float(latest.get("ema50", 0))
-        ema50_vnd = raw_ema50 * 1000.0 if raw_ema50 < 1000 else raw_ema50
+        raw_upper = float(latest.get("upper_band", 0))
+        upper_vnd = raw_upper * 1000.0 if raw_upper < 1000 else raw_upper
+
+        raw_lower = float(latest.get("lower_band", 0))
+        lower_vnd = raw_lower * 1000.0 if raw_lower < 1000 else raw_lower
 
         rsi14 = float(latest.get("rsi14", 0))
+        prev_rsi14 = float(previous.get("rsi14", 0))
         volume = float(latest.get("volume", 0))
 
-        vol_ma20 = float(latest.get("vol_ma20", 0)) if pd.notna(latest.get("vol_ma20")) else 0.0
-        vol_ratio = (volume / vol_ma20) if vol_ma20 > 0 else 0.0
-
+        # Đóng gói Dictionary chuẩn Chiến lược Mean Reversion
         ta_data_dict = {
             "close": price_vnd,
-            "ema20": ema20_vnd,
-            "ema50": ema50_vnd,
+            "open": float(latest.get("open", 0)) * (1000.0 if float(latest.get("open", 0)) < 1000 else 1.0),
+            "ma20": ma20_vnd,
+            "upper_band": upper_vnd,
+            "lower_band": lower_vnd,
             "rsi14": rsi14,
-            "volume": volume,
-            "vol_ma20": vol_ma20,
-            "volume_ratio": vol_ratio
+            "prev_rsi14": prev_rsi14,
+            "volume": volume
         }
 
-        # Đánh giá kịch bản bán dựa trên vị thế hiện tại
+        # Đánh giá kịch bản bán dựa trên vị thế
         entry_price = PORTFOLIO_POSITIONS.get(symbol)
         sell_eval = evaluate_sell_scenarios(
             symbol=symbol,
@@ -405,15 +689,20 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # Xuất biểu đồ và gửi tin nhắn
-        chart_path = generate_chart(df_ind, symbol)
-        await msg.delete()
+        chart_path = await asyncio.to_thread(generate_chart, df_ind, symbol)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
 
         with open(chart_path, "rb") as photo_file:
             await update.message.reply_photo(
                 photo=photo_file,
                 caption=report_html,
-                parse_mode="HTML"
-            )
+                parse_mode="HTML",
+                read_timeout=60,  # Cho phép tối đa 60 giây để upload ảnh
+                write_timeout=60
+    )
 
         if os.path.exists(chart_path):
             os.remove(chart_path)
@@ -421,28 +710,6 @@ async def analyze_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Lỗi phân tích mã {symbol}: {e}")
         await update.message.reply_text(f"❌ Có lỗi xảy ra khi xử lý mã {symbol}: {e}")
-
-
-async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        args = context.args
-        if len(args) < 4:
-            await update.message.reply_text("⚠️ Cú pháp: <code>/trade &lt;MUA/BAN&gt; &lt;MÃ&gt; &lt;GIÁ&gt; &lt;KHỐI_LƯỢNG&gt;</code>", parse_mode="HTML")
-            return
-
-        action, symbol, price, volume = args[0].upper(), args[1].upper(), float(args[2]), int(args[3])
-        side = "NB" if action in ["MUA", "NB", "BUY"] else "NS"
-
-        await update.message.reply_text(f"🚀 Đang kết nối gửi lệnh <b>{action} {volume:,} {symbol}</b> giá <b>{price:,.2f}</b>...", parse_mode="HTML")
-        success = execute_bot_trade(side=side, symbol=symbol, price=price, volume=volume)
-
-        if success:
-            await update.message.reply_text(f"✅ Đã gửi lệnh {action} {symbol} thành công!")
-        else:
-            await update.message.reply_text("❌ Không thể kết nối tới Gateway đặt lệnh.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Lỗi xử lý lệnh: {e}")
-
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.warning(f"⚠️ Phát sinh lỗi hệ thống/mạng: {context.error}")
@@ -459,16 +726,20 @@ def main():
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .connect_timeout(30)
+        .read_timeout(60.0)
+        .write_timeout(60.0)
+        .connect_timeout(60.0)
+        .pool_timeout(60.0)
         .build()
     )
 
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("trade", trade_command))
     app.add_handler(CommandHandler("scan", scan_command))
     app.add_handler(CommandHandler("quet", scan_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("market", market_command))
+    app.add_handler(CommandHandler("vnindex", market_command))
+
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), analyze_ticker))
     app.add_error_handler(global_error_handler)
 

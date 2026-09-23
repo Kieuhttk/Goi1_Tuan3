@@ -1,9 +1,9 @@
 import datetime
 import pandas as pd
-from vnstock import Vnstock
+from vnstock.api.quote import Quote
 
 # =========================================================
-# CẤU HÌNH HỆ THỐNG FINBOT (BẢN TỐI ƯU SWING TRADING SIDEWAY)
+# CẤU HÌNH FINBOT - CHIẾN LƯỢC MEAN REVERSION (BẮT ĐÁY SIDEWAY)
 # =========================================================
 INITIAL_CAPITAL = 100_000_000
 WATCHLIST = ["HPG", "SSI", "VNM", "ACB"]
@@ -15,16 +15,12 @@ start_date = end_date - datetime.timedelta(days=180)
 START_DATE_STR = start_date.strftime("%Y-%m-%d")
 END_DATE_STR = end_date.strftime("%Y-%m-%d")
 
-FA_DATA = {
-    "HPG": {"type": "NORMAL", "LNST_gt_0": True, "ROE": 0.14, "DE": 0.8},
-    "SSI": {"type": "NORMAL", "LNST_gt_0": True, "ROE": 0.13, "DE": 1.2},
-    "VNM": {"type": "NORMAL", "LNST_gt_0": True, "ROE": 0.22, "DE": 0.4},
-    "ACB": {"type": "BANK", "LNST_gt_0": True, "ROE": 0.21, "NIM": 0.038}
-}
-
 def calculate_ta(df):
-    df['EMA20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
+    # MA20 & Bollinger Bands
+    df['MA20'] = df['close'].rolling(window=20).mean()
+    df['STD20'] = df['close'].rolling(window=20).std()
+    df['Upper_Band'] = df['MA20'] + (df['STD20'] * 2.0)
+    df['Lower_Band'] = df['MA20'] - (df['STD20'] * 2.0)
     
     # RSI (14)
     delta = df['close'].diff()
@@ -33,17 +29,14 @@ def calculate_ta(df):
     rs = gain / loss
     df['RSI14'] = 100 - (100 / (1 + rs))
     
-    # Volume Ratio
-    df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
-    df['VR'] = df['volume'] / df['Vol_MA20']
     return df
 
 results = []
 
 for symbol in WATCHLIST:
     try:
-        stock = Vnstock().stock(symbol=symbol, source='VCI')
-        df = stock.quote.history(start=START_DATE_STR, end=END_DATE_STR, interval='1D')
+        q = Quote(symbol=symbol, source='VCI')
+        df = q.history(start=START_DATE_STR, end=END_DATE_STR, interval='1D')
         
         if df is None or df.empty or len(df) < 50:
             continue
@@ -63,19 +56,17 @@ for symbol in WATCHLIST:
             price = row['close']
             date_str = row['time'].strftime('%Y-%m-%d')
 
-            # TÍN HIỆU MUA TẠI NỀN HỖ TRỢ (SWING TRADING LOGIC)
-            # 1. Giá nằm vùng hỗ trợ quanh EMA20/EMA50 (Độ lệch <= 2.5%)
-            near_ema20 = abs(price - row['EMA20']) / row['EMA20'] <= 0.025
+            # TÍN HIỆU MUA MEAN REVERSION (BẮT ĐÁY BIÊN DƯỚI)
+            # 1. Giá tiệm cận / rớt khỏi dải Bollinger Band dưới HOẶC RSI quá bán (RSI <= 42)
+            near_lower_bb = price <= (row['Lower_Band'] * 1.01)
+            rsi_oversold = row['RSI14'] <= 42
             
-            # 2. RSI ở vùng giá tốt (38 - 56) và bắt đầu hướng lên
-            rsi_good = (38 <= row['RSI14'] <= 56) and (row['RSI14'] > prev_row['RSI14'])
-            
-            # 3. Nến xanh đảo chiều ngắn hạn
-            green_candle = price > row['open']
+            # 2. Nến xanh xác nhận rút chân / đảo chiều ngắn hạn
+            rebound_candle = (price > row['open']) and (row['RSI14'] > prev_row['RSI14'])
 
-            is_buy_signal = near_ema20 and rsi_good and green_candle
+            is_buy_signal = (near_lower_bb or rsi_oversold) and rebound_candle
 
-            # Thực thi MUA
+            # THỰC THI MUA
             if position == 0 and is_buy_signal:
                 max_buy_amount = cash * (1 - COMMISSION)
                 position = int(max_buy_amount // price)
@@ -85,14 +76,15 @@ for symbol in WATCHLIST:
                     cash -= cost
                     trades.append({'type': 'BUY', 'date': date_str, 'price': buy_price, 'shares': position})
 
-            # TÍN HIỆU BÁN TỐI ƯU WIN RATE (TAKE PROFIT CHỦ ĐỘNG)
+            # THỰC THI BÁN (CHỐT LỜI KHI CHẠM ĐƯỜNG GIỮA MA20 HOẶC RSI HỒI PHỤC)
             elif position > 0:
                 pnl_pct = (price - buy_price) / buy_price
+
+                # Chốt lời chủ động khi giá chạm lại đường trung bình MA20 hoặc RSI >= 56
+                is_take_profit = (price >= row['MA20']) or (row['RSI14'] >= 56) or (pnl_pct >= 0.04)
                 
-                # Chốt lời ngắn +5% hoặc RSI chớm đi vào vùng quá mua (>62)
-                is_take_profit = (pnl_pct >= 0.05) or (row['RSI14'] >= 62)
-                # Cắt lỗ nghiêm ngặt -3.5%
-                is_stop_loss = pnl_pct <= -0.035
+                # Cắt lỗ ngắn nghiêm ngặt -3.0%
+                is_stop_loss = pnl_pct <= -0.03
 
                 if is_take_profit or is_stop_loss:
                     sell_price = price
@@ -102,7 +94,7 @@ for symbol in WATCHLIST:
                     trades.append({'type': 'SELL', 'date': date_str, 'price': sell_price, 'pnl_pct': net_pnl * 100})
                     position = 0
 
-        # Tổng kết
+        # TỔNG KẾT
         final_val = cash + (position * df.iloc[-1]['close'] * (1 - COMMISSION))
         profit_pct = ((final_val - (INITIAL_CAPITAL * MAX_POSITION_RATIO)) / (INITIAL_CAPITAL * MAX_POSITION_RATIO)) * 100
         
@@ -125,7 +117,7 @@ for symbol in WATCHLIST:
 # BÁO CÁO KẾT QUẢ
 # =========================================================
 print("=" * 60)
-print("📌 KẾT QUẢ BACKTEST TỐI ƯU SWING TRADING TẠI NỀN HỖ TRỢ")
+print("📌 KẾT QUẢ BACKTEST MEAN REVERSION (BOLLINGER BANDS + RSI)")
 print("=" * 60)
 res_df = pd.DataFrame(results)
 print(res_df.to_string(index=False))

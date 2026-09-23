@@ -1,5 +1,5 @@
 # ==============================================================================
-# MODULE: data_realtime.py (FIXED REALTIME MULTI-SOURCE & TIMEZONE)
+# MODULE: data_realtime.py (MEAN REVERSION STRATEGY & VN-INDEX FILTER)
 # ==============================================================================
 import time
 import requests
@@ -12,6 +12,8 @@ try:
     from vnstock import Quote
 except ImportError:
     Quote = None
+
+from config import TECHNICAL_STRATEGY
 
 
 def get_realtime_ohlcv(symbol: str, limit: int = 150, resolution: str = "1D", interval: str = None, **kwargs) -> pd.DataFrame:
@@ -108,7 +110,7 @@ def _patch_today_realtime_candle(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
     """
     price, vol = 0.0, 0.0
 
-    # Nguồn 1: API Bảng giá VPS / Direct Quote (Rất nhanh và ổn định)
+    # Nguồn 1: API Bảng giá VPS / Direct Quote
     try:
         url_vps = f"https://bgapidatafeed.vps.com.vn/getliststockdata/{symbol}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -117,7 +119,6 @@ def _patch_today_realtime_candle(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
             data = res.json()
             if isinstance(data, list) and len(data) > 0:
                 item = data[0]
-                # 'lastPrice' hoặc 'lastMatchedPrice' từ VPS
                 price = float(item.get("lastPrice", 0.0) or item.get("lastMatchedPrice", 0.0) or item.get("closePrice", 0.0))
                 vol = float(item.get("lot", 0.0) or item.get("totalVol", 0.0))
                 if price > 0:
@@ -155,7 +156,7 @@ def _patch_today_realtime_candle(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
         except Exception as e:
             print(f"⚠️ VnStock 1m fallback error: {e}")
 
-    # Chuẩn hóa đơn vị giá về VNĐ (Ví dụ: 20.95 -> 20950 VNĐ)
+    # Chuẩn hóa đơn vị giá về VNĐ
     if 0 < price < 1000:
         price *= 1000
 
@@ -201,23 +202,34 @@ def _patch_today_realtime_candle(symbol: str, df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ==============================================================================
+# HÀM TÍNH TOÁN CÁC CHỈ BÁO CHIẾN LƯỢC MEAN REVERSION (BOLLINGER BANDS & RSI)
+# ==============================================================================
+
 def calculate_realtime_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculates MA20, Bollinger Bands (2.0), and RSI(14) for Mean Reversion Strategy."""
     if df is None or df.empty or len(df) < 20:
         return df
 
     df = df.copy()
-    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-    df["vol_ma20"] = df["volume"].rolling(window=20).mean()
+    
+    # 1. Lấy tham số cấu hình từ config.py
+    bb_window = TECHNICAL_STRATEGY.get("BB_WINDOW", 20)
+    bb_std = TECHNICAL_STRATEGY.get("BB_STD", 2.0)
+    rsi_window = TECHNICAL_STRATEGY.get("RSI_WINDOW", 14)
 
+    # 2. Tính đường MA20 & Bollinger Bands
+    df["ma20"] = df["close"].rolling(window=bb_window).mean()
+    df["std20"] = df["close"].rolling(window=bb_window).std()
+    df["upper_band"] = df["ma20"] + (df["std20"] * bb_std)
+    df["lower_band"] = df["ma20"] - (df["std20"] * bb_std)
+
+    # 3. Tính RSI (14)
     delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -1 * delta.clip(upper=0)
-
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/rsi_window, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/rsi_window, adjust=False).mean()
+    
+    rs = gain / loss.replace(0, np.nan)
     df["rsi14"] = 100 - (100 / (1 + rs))
     df["rsi14"] = df["rsi14"].fillna(50.0)
 
@@ -225,33 +237,67 @@ def calculate_realtime_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_realtime_indicators(symbol: str) -> dict:
+    """Trả về dictionary đầy đủ tham số kỹ thuật Mean Reversion mới nhất của mã cổ phiếu."""
     df = get_realtime_ohlcv(symbol, limit=150)
-    if df is None or df.empty:
+    if df is None or df.empty or len(df) < 20:
         return {}
 
     df_ind = calculate_realtime_indicators(df)
     latest = df_ind.iloc[-1]
+    prev = df_ind.iloc[-2]
 
     close_val = float(latest.get("close", 0.0))
-    vol_val = float(latest.get("volume", 0.0))
-    vol_ma20_val = float(latest.get("vol_ma20", 1.0)) if pd.notna(latest.get("vol_ma20")) else 1.0
-    vol_ratio = (vol_val / vol_ma20_val) if vol_ma20_val > 0 else 0.0
+    open_val = float(latest.get("open", 0.0))
 
     return {
         "symbol": symbol.upper(),
         "close": close_val,
-        "ema20": float(latest.get("ema20", 0.0)),
-        "ema50": float(latest.get("ema50", 0.0)),
+        "open": open_val,
+        "ma20": float(latest.get("ma20", 0.0)),
+        "upper_band": float(latest.get("upper_band", 0.0)),
+        "lower_band": float(latest.get("lower_band", 0.0)),
         "rsi14": float(latest.get("rsi14", 0.0)),
-        "volume": vol_val,
-        "vol_ma20": vol_ma20_val,
-        "volume_ratio": vol_ratio,
+        "prev_rsi14": float(prev.get("rsi14", 0.0)),
+        "volume": float(latest.get("volume", 0.0)),
         "updated_at": latest.get("time")
     }
 
 
+def check_vnindex_safe() -> bool:
+    """
+    KTL Bộ lọc An toàn VN-Index:
+    Ngăn Bot mở vị thế nếu VN-Index sụp gãy sâu hơn ngưỡng cho phép dưới dải Lower Band.
+    """
+    if not TECHNICAL_STRATEGY.get("USE_MARKET_FILTER", True):
+        return True
+
+    try:
+        df_vn = get_realtime_ohlcv("VNINDEX", limit=100)
+        if df_vn is None or df_vn.empty or len(df_vn) < 20:
+            return True
+
+        df_vn_ind = calculate_realtime_indicators(df_vn)
+        latest_vn = df_vn_ind.iloc[-1]
+        
+        vn_close = float(latest_vn.get("close", 0.0))
+        vn_lower_band = float(latest_vn.get("lower_band", 0.0))
+        buffer = TECHNICAL_STRATEGY.get("VNINDEX_BB_BUFFER", 0.995)
+
+        # Trả về False nếu VN-Index sụp hoảng loạn dưới Lower Band * buffer
+        if vn_close > 0 and vn_lower_band > 0:
+            is_safe = vn_close >= (vn_lower_band * buffer)
+            if not is_safe:
+                print(f"⚠️ [MARKET FILTER] VN-Index ({vn_close:,.2f}) gãy dải Lower Band ({vn_lower_band:,.2f}). TẠM DỪNG MUA!")
+            return is_safe
+    except Exception as e:
+        print(f"⚠️ Lỗi khi kiểm tra bộ lọc VN-Index: {e}")
+        
+    return True
+
+
 if __name__ == "__main__":
     test_symbol = "SSI"
-    print(f"🚀 Testing realtime indicators for {test_symbol}...")
+    print(f"🚀 Testing realtime indicators (Mean Reversion) for {test_symbol}...")
     res = get_realtime_indicators(test_symbol)
     print("👉 Output:", res)
+    print("👉 VN-Index Market Safe Check:", check_vnindex_safe())
