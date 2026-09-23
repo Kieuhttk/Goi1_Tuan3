@@ -11,6 +11,7 @@ import logging
 import warnings
 import asyncio
 import pandas as pd
+import numpy as np
 import html
 import requests
 from datetime import datetime, time as dtime
@@ -511,86 +512,161 @@ def keep_alive():
 # ==============================================================================
 # HÀM VẼ BIỂU ĐỒ KỸ THUẬT (TA CHART)
 # ==============================================================================
-def generate_chart(df: pd.DataFrame, symbol: str) -> str:
-    """Vẽ biểu đồ TA nền trắng sáng (Light Theme) trực quan chuyên nghiệp."""
-    chart_filename = f"temp_{symbol}.png"
+def generate_chart(df: pd.DataFrame, ticker: str, stock_type_str: str = "Thường - Biên độ trung bình") -> str:
+    """
+    Hàm vẽ biểu đồ kỹ thuật 3 khung chuẩn hóa khớp 100% với logic Source Code:
+    1. Khung 1: Biểu đồ nến Nhật (Candlestick) + Bollinger Bands + Mũi tên tín hiệu BUY/SELL
+    2. Khung 2: RSI(14) với ngưỡng Quá Bán = 42, Quá Mua = 62 (Khớp config)
+    3. Khung 3: Khối lượng giao dịch (Volume) + MA20 Volume
     
-    BANK_CODES = ["ACB", "TCB", "MBB", "STB", "VCB", "CTG", "BID", "HDB", "VPB", "TPB"]
-    is_bank = symbol in BANK_CODES
+    Returns:
+        str: Đường dẫn file ảnh được lưu (hoặc None nếu gặp lỗi)
+    """
+    try:
+        if df is None or df.empty:
+            logger.error(f"❌ DataFrame của {ticker} bị rỗng, không thể vẽ chart.")
+            return None
 
-    df = df.copy()
-    scale = 1000.0 if df['close'].iloc[-1] > 1000 else 1.0
-    
-    close_s = df['close'] / scale
-    ma20_s = df.get('ma20', pd.Series(dtype=float)) / scale
-    upper_s = df.get('upper_band', pd.Series(dtype=float)) / scale
-    lower_s = df.get('lower_band', pd.Series(dtype=float)) / scale
-
-    # Nền trắng chuẩn
-    fig = plt.figure(figsize=(10, 7), facecolor='#ffffff')
-    gs = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.18)
-    
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    ax3 = fig.add_subplot(gs[2], sharex=ax1)
-
-    # KHUNG 1: NỀN GIÁ & BOLLINGER BANDS
-    ax1.set_facecolor('#ffffff')
-    ax1.plot(close_s.values, label='Giá đóng cửa', color='#0d47a1', linewidth=2.0, zorder=4)
-    
-    if not ma20_s.empty:
-        ax1.plot(ma20_s.values, label='MA20', color='#e65100', linestyle='--', linewidth=1.2)
-    if not upper_s.empty and not lower_s.empty:
-        ax1.plot(upper_s.values, label='Upper Band', color='#c62828', linestyle=':', linewidth=1.0)
-        ax1.plot(lower_s.values, label='Lower Band', color='#2e7d32', linestyle=':', linewidth=1.0)
-        ax1.fill_between(range(len(df)), lower_s.values, upper_s.values, color='#bbdefb', alpha=0.25)
-
-    title_tag = " [BANK - Biên độ hẹp]" if is_bank else " [NON-BANK - Beta cao]"
-    ax1.set_title(f"Biểu đồ Phân tích #{symbol}{title_tag}", color='#111111', fontsize=13, fontweight='bold', pad=10)
-    ax1.legend(loc='upper left', facecolor='#f5f5f5', edgecolor='#cccccc', labelcolor='#111111', fontsize=8)
-    ax1.tick_params(colors='#111111', labelbottom=False)
-    ax1.grid(True, linestyle=':', alpha=0.5, color='#b0bec5')
-
-    # KHUNG 2: RSI(14)
-    ax2.set_facecolor('#ffffff')
-    if 'rsi14' in df.columns:
-        ax2.plot(df['rsi14'].values, color='#0288d1', label='RSI(14)', linewidth=1.5)
+        # ------------------------------------------------------------------
+        # A. KHỞI TẠO KHUNG VẼ (FIG & AXES)
+        # ------------------------------------------------------------------
+        fig, (ax_price, ax_rsi, ax_vol) = plt.subplots(
+            nrows=3, 
+            ncols=1, 
+            figsize=(10, 7), 
+            sharex=True, 
+            gridspec_kw={'height_ratios': [3, 1.2, 1]}
+        )
         
-        rsi_oversold = 35.0 if is_bank else 30.0
-        rsi_overbought = 65.0 if is_bank else 70.0
+        # Reset index để vẽ nến theo chỉ số x liên tục
+        df_plot = df.reset_index(drop=True)
+        x_indices = np.arange(len(df_plot))
 
-        ax2.axhline(rsi_overbought, color='#c62828', linestyle='--', alpha=0.7, label=f'Quá Mua ({rsi_overbought:.0f})')
-        ax2.axhline(rsi_oversold, color='#2e7d32', linestyle='--', alpha=0.7, label=f'Quá Bán ({rsi_oversold:.0f})')
-        ax2.axhline(50, color='gray', linestyle=':', alpha=0.5)
-
-        ax2.fill_between(range(len(df)), df['rsi14'].values, rsi_oversold, 
-                         where=(df['rsi14'].values <= rsi_oversold), color='#a5d6a7', alpha=0.5)
-
-    ax2.set_ylim(10, 90)
-    ax2.tick_params(colors='#111111', labelbottom=False)
-    ax2.grid(True, linestyle=':', alpha=0.5, color='#b0bec5')
-    ax2.legend(loc='upper left', facecolor='#f5f5f5', edgecolor='#cccccc', labelcolor='#111111', fontsize=8)
-
-    # KHUNG 3: VOLUME
-    ax3.set_facecolor('#ffffff')
-    if 'volume' in df.columns:
-        colors = ['#2e7d32' if df['close'].iloc[i] >= df['open'].iloc[i] else '#c62828' for i in range(len(df))]
-        ax3.bar(range(len(df)), df['volume'].values, color=colors, alpha=0.75, width=0.7)
+        # ------------------------------------------------------------------
+        # B. KHUNG 1: CÂY NẾN NHẬT (CANDLESTICK) & BOLLINGER BANDS
+        # ------------------------------------------------------------------
+        # Xác định màu nến: Xanh (Close >= Open), Đỏ (Close < Open)
+        colors = ['#26a69a' if close >= open_p else '#ef5350' 
+                  for close, open_p in zip(df_plot['close'], df_plot['open'])]
         
-        vol_ma20 = df['volume'].rolling(20).mean()
-        ax3.plot(vol_ma20.values, color='#e65100', linewidth=1.2, label='Vol MA20')
+        # Vẽ bóng nến (High - Low)
+        ax_price.vlines(x_indices, ymin=df_plot['low'], ymax=df_plot['high'], color=colors, linewidth=1)
+        
+        # Vẽ thân nến (Open - Close)
+        for i in range(len(df_plot)):
+            bottom = min(df_plot['open'].iloc[i], df_plot['close'].iloc[i])
+            height = abs(df_plot['close'].iloc[i] - df_plot['open'].iloc[i])
+            # Nếu nến doji (height == 0), cho độ cao tối thiểu để hiển thị
+            height = max(height, (df_plot['high'].iloc[i] - df_plot['low'].iloc[i]) * 0.02)
+            ax_price.add_patch(
+                plt.Rectangle(
+                    (i - 0.3, bottom), 0.6, height, 
+                    color=colors[i], zorder=3
+                )
+            )
 
-    ax3.tick_params(colors='#111111')
-    ax3.grid(True, linestyle=':', alpha=0.5, color='#b0bec5')
-    ax3.legend(loc='upper left', facecolor='#f5f5f5', edgecolor='#cccccc', labelcolor='#111111', fontsize=8)
+        # Vẽ các đường chỉ báo Bollinger Bands nếu tồn tại
+        if 'ma20' in df_plot.columns:
+            ax_price.plot(x_indices, df_plot['ma20'], label='MA20', color='#d32f2f', linestyle='--', linewidth=1)
+        if 'upper_band' in df_plot.columns:
+            ax_price.plot(x_indices, df_plot['upper_band'], label='Upper Band', color='#78909c', linestyle=':', linewidth=1)
+        if 'lower_band' in df_plot.columns:
+            ax_price.plot(x_indices, df_plot['lower_band'], label='Lower Band', color='#78909c', linestyle=':', linewidth=1)
+        
+        # Tô màu dải Bollinger Bands
+        if 'lower_band' in df_plot.columns and 'upper_band' in df_plot.columns:
+            ax_price.fill_between(x_indices, df_plot['lower_band'], df_plot['upper_band'], color='#e3f2fd', alpha=0.5)
 
-    plt.tight_layout()
-    plt.savefig(chart_filename, dpi=150, facecolor=fig.get_facecolor(), edgecolor='none')
-    plt.close()
+        # ------------------------------------------------------------------
+        # C. TỰ ĐỘNG PHÁT HIỆN VÀ VẼ MŨI TÊN BUY 🟢 / SELL 🔴 (TỪ SCANNER LOGIC)
+        # ------------------------------------------------------------------
+        for i in range(1, len(df_plot)):
+            close_p = df_plot['close'].iloc[i]
+            low_p = df_plot['low'].iloc[i]
+            high_p = df_plot['high'].iloc[i]
+            rsi_val = df_plot['rsi14'].iloc[i] if 'rsi14' in df_plot.columns else 50
+            lower_b = df_plot['lower_band'].iloc[i] if 'lower_band' in df_plot.columns else 0
+            upper_b = df_plot['upper_band'].iloc[i] if 'upper_band' in df_plot.columns else 999999
+            
+            candle_range = high_p - low_p
+            tail_ratio = (close_p - low_p) / candle_range if candle_range > 0 else 0
 
-    return chart_filename
+            # Điều kiện MUA / BÁN
+            is_buy = (
+                close_p <= lower_b * 1.015 and 
+                rsi_val <= 42 and 
+                (tail_ratio > 0.4 or rsi_val > df_plot['rsi14'].iloc[i-1])
+            )
+            is_sell = (close_p >= upper_b or rsi_val >= 62)
 
+            # Vẽ BUY (Xóa emoji để tránh lỗi ô vuông, dùng chữ thuần)
+            if is_buy:
+                ax_price.annotate(
+                    'BUY', 
+                    xy=(i, low_p), 
+                    xytext=(i, low_p * 0.985),
+                    arrowprops=dict(facecolor='#2e7d32', edgecolor='#2e7d32', shrink=0.1, width=1, headwidth=4),
+                    ha='center', va='top', fontsize=8, fontweight='bold', color='#2e7d32'
+                )
+            # Vẽ SELL
+            elif is_sell and rsi_val >= 62:
+                ax_price.annotate(
+                    'SELL', 
+                    xy=(i, high_p), 
+                    xytext=(i, high_p * 1.015),
+                    arrowprops=dict(facecolor='#c62828', edgecolor='#c62828', shrink=0.1, width=1, headwidth=4),
+                    ha='center', va='bottom', fontsize=8, fontweight='bold', color='#c62828'
+                )
 
+        # NÂNG TRẦN GIÁ TRÊN TRỤC Y ĐỂ KHÔNG BỊ CHẠM TIÊU ĐỀ
+        y_min = df_plot['low'].min()
+        y_max = df_plot['high'].max()
+        ax_price.set_ylim(y_min * 0.97, y_max * 1.06)  # Mở rộng biên trên 6% và biên dưới 3%
+
+        ax_price.set_title(f"Biểu đồ Phân tích #{ticker} [{stock_type_str}]", fontsize=12, fontweight='bold', pad=15)
+        ax_price.legend(loc='upper left', fontsize=8)
+        ax_price.grid(True, linestyle='--', alpha=0.3)
+        # ------------------------------------------------------------------
+        # D. KHUNG 2: RSI(14) CHUẨN THAM SỐ CODE (BUY=42, SELL=62)
+        # ------------------------------------------------------------------
+        if 'rsi14' in df_plot.columns:
+            ax_rsi.plot(x_indices, df_plot['rsi14'], label='RSI(14)', color='#0288d1', linewidth=1.5)
+            
+            # ĐƯỜNG NGHƯỠNG KHỚP 100% VỚI SOURCE CODE
+            ax_rsi.axhline(62, color='#b71c1c', linestyle='--', linewidth=1, label='Quá Mua (62)')
+            ax_rsi.axhline(42, color='#1b5e20', linestyle='--', linewidth=1, label='Quá Bán (42)')
+            
+            # Tô màu vùng quá bán (RSI <= 42)
+            ax_rsi.fill_between(x_indices, df_plot['rsi14'], 42, where=(df_plot['rsi14'] <= 42), color='#c8e6c9', alpha=0.6)
+
+        ax_rsi.set_ylim(10, 90)
+        ax_rsi.legend(loc='upper left', fontsize=8)
+        ax_rsi.grid(True, linestyle='--', alpha=0.3)
+
+        # ------------------------------------------------------------------
+        # E. KHUNG 3: KHỐI LƯỢNG GIAO DỊCH (VOLUME)
+        # ------------------------------------------------------------------
+        if 'volume' in df_plot.columns:
+            ax_vol.bar(x_indices, df_plot['volume'], color=colors, alpha=0.8, width=0.6)
+        if 'vol_ma20' in df_plot.columns:
+            ax_vol.plot(x_indices, df_plot['vol_ma20'], color='#ef6c00', label='Vol MA20', linewidth=1)
+            ax_vol.legend(loc='upper left', fontsize=8)
+            
+        ax_vol.grid(True, linestyle='--', alpha=0.3)
+
+        # Lưu file ảnh và trả về đường dẫn
+        chart_path = f"{ticker}_chart.png"
+        plt.tight_layout()
+        plt.savefig(chart_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
+        return chart_path  # BẮT BUỘC TRẢ VỀ ĐƯỜNG DẪN FILE
+
+    except Exception as e:
+        logger.error(f"⚠️ Lỗi khi vẽ biểu đồ cho {ticker}: {e}")
+        plt.close('all')
+        return None
+    
 # ==============================================================================
 # XỬ LÝ LỆNH PHÂN TÍCH VÀ COMMAND
 # ==============================================================================
