@@ -3,17 +3,17 @@
 # Chức năng:
 #   - Quản lý Cache SQLite cho Dữ liệu Tài chính Cơ bản (FA)
 #   - Khắc phục triệt để lỗi Thread-Lock & Ephemeral Filesystem trên Render
-#   - Tự động invalidate Cache cũ (>24h) để dữ liệu Backtest luôn chính xác
+#   - Tự động invalidate Cache cũ (>24h) chuẩn múi giờ
 # ==============================================================================
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-# Sử dụng đường dẫn tuyệt đối trong thư mục tạm hoặc thư mục gốc ứng dụng
+# Sử dụng đường dẫn tuyệt đối trong thư mục gốc ứng dụng
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "finbot_cache.db")
 
-# Cấu hình thời gian sống của Cache FA (24 giờ) để đảm bảo dữ liệu luôn mới nhất
+# Cấu hình thời gian sống của Cache FA (24 giờ)
 CACHE_TTL_HOURS = 24
 
 
@@ -63,7 +63,7 @@ def get_fa_from_db(ticker: str) -> dict:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT *, datetime(updated_at, 'localtime') as local_updated FROM finbot_cache WHERE ticker = ?",
+            "SELECT * FROM finbot_cache WHERE ticker = ?",
             (ticker.upper(),)
         )
         row = cursor.fetchone()
@@ -72,13 +72,14 @@ def get_fa_from_db(ticker: str) -> dict:
         if row:
             data = dict(row)
             
-            # KIỂM TRẢ HẠN CACHE (TỐI ƯU BACKTEST DỮ LIỆU MỚI)
+            # KIỂM TRẢ HẠN CACHE (Đồng bộ UTC để tránh lệch giờ Server Render)
             updated_str = data.get("updated_at")
             if updated_str:
                 try:
-                    # Parse thời gian cập nhật
-                    updated_time = datetime.strptime(updated_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() - updated_time > timedelta(hours=CACHE_TTL_HOURS):
+                    updated_time = datetime.strptime(updated_str.split(".")[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    now_utc = datetime.now(timezone.utc)
+                    
+                    if now_utc - updated_time > timedelta(hours=CACHE_TTL_HOURS):
                         print(f"🔄 Cache FA của mã {ticker} đã hết hạn (>24h). Cần làm mới.")
                         return None
                 except Exception:
