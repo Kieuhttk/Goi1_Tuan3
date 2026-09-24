@@ -9,7 +9,6 @@ import time
 import logging
 from datetime import datetime
 import pytz
-
 # Import các tham số cấu hình từ config.py
 from config import (
     TECHNICAL_STRATEGY, 
@@ -223,7 +222,7 @@ if __name__ == "__main__":
     # Lập lịch chạy trong giờ giao dịch
     schedule.every().day.at("09:15").do(run_market_scanner)
     schedule.every().day.at("10:00").do(run_market_scanner)
-    schedule.every().day.at("11:15").do(run_market_scanner)
+    schedule.every().day.at("11:45").do(run_market_scanner)
     schedule.every().day.at("13:30").do(run_market_scanner)
     schedule.every().day.at("14:15").do(run_market_scanner)
 
