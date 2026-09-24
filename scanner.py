@@ -224,7 +224,7 @@ if __name__ == "__main__":
     schedule.every().day.at("01:30").do(run_market_scanner)  # 08:30 VN
     schedule.every().day.at("02:00").do(run_market_scanner)  # 09:00 VN
     schedule.every().day.at("02:30").do(run_market_scanner)  # 09:30 VN
-    schedule.every().day.at("03:35").do(run_market_scanner)  # 10:35 VN
+    schedule.every().day.at("16:10").do(run_market_scanner)  # 10:35 VN
     # Quét thử 1 lần ngay khi khởi động
     run_market_scanner(send_to_telegram=True)
 
