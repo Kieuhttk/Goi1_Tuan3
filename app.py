@@ -28,11 +28,11 @@ def run_scheduler():
     print("🚀 [FINBOT SCANNER] Đã kích hoạt tiến trình lập lịch ngầm...")
     
     # Lập lịch chạy trong giờ giao dịch (Tự động gửi báo cáo về Telegram)
-    schedule.every().day.at("09:15").do(run_market_scanner, send_to_telegram=True)
-    schedule.every().day.at("10:00").do(run_market_scanner, send_to_telegram=True)
-    schedule.every().day.at("11:15").do(run_market_scanner, send_to_telegram=True)
-    schedule.every().day.at("13:30").do(run_market_scanner, send_to_telegram=True)
-    schedule.every().day.at("14:15").do(run_market_scanner, send_to_telegram=True)
+    schedule.every().day.at("01:15").do(run_market_scanner)  # 08:15 VN
+    schedule.every().day.at("01:30").do(run_market_scanner)  # 08:30 VN
+    schedule.every().day.at("02:00").do(run_market_scanner)  # 09:00 VN
+    schedule.every().day.at("02:30").do(run_market_scanner)  # 09:30 VN
+    schedule.every().day.at("03:35").do(run_market_scanner)  # 10:35 VN
 
     # Vòng lặp duy trì tiến trình quét
     while True:

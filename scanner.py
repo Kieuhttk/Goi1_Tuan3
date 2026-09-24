@@ -192,7 +192,7 @@ def run_market_scanner(send_to_telegram: bool = True) -> str:
     # 5. TỔNG HỢP NỘI DUNG BÁO CÁO
     time_str = get_current_time_str()
     msg = "🚀 <b>FINBOT — CẢNH BÁO BẮT ĐÁY (MEAN REVERSION)</b>\n"
-    msg = f"<i>Thời gian quét: {time_str}</i>\n"
+    msg += f"<i>Thời gian quét: {time_str}</i>\n"
     msg += "═══════════════════════════════\n\n"
 
     if buy_signals:
@@ -220,12 +220,11 @@ if __name__ == "__main__":
     print("🚀 [FINBOT SCANNER] Hệ thống quét tự động đã kích hoạt...")
     
     # Lập lịch chạy trong giờ giao dịch
-    schedule.every().day.at("09:15").do(run_market_scanner)
-    schedule.every().day.at("10:00").do(run_market_scanner)
-    schedule.every().day.at("11:45").do(run_market_scanner)
-    schedule.every().day.at("13:30").do(run_market_scanner)
-    schedule.every().day.at("14:15").do(run_market_scanner)
-
+    schedule.every().day.at("01:15").do(run_market_scanner)  # 08:15 VN
+    schedule.every().day.at("01:30").do(run_market_scanner)  # 08:30 VN
+    schedule.every().day.at("02:00").do(run_market_scanner)  # 09:00 VN
+    schedule.every().day.at("02:30").do(run_market_scanner)  # 09:30 VN
+    schedule.every().day.at("03:35").do(run_market_scanner)  # 10:35 VN
     # Quét thử 1 lần ngay khi khởi động
     run_market_scanner(send_to_telegram=True)
 
